@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <string name="app_name">PPSSPP</string>
-    <string name="shortcut_name">PPSSPP game</string>
+    <string name="app_name">Sphynx</string>
+    <string name="shortcut_name">Sphynx game</string>
 
 	<string name="bad_disc_title">Unsupported disc</string>
 	<string name="bad_disc_message">The file you selected wasn\'t recognized as a game.</string>

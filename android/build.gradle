@@ -137,7 +137,8 @@ android {
 	}
 	productFlavors {
 		normal {
-			applicationId 'org.ppsspp.ppsspp'
+			// SPHYNX: own package id so Sphynx installs alongside PPSSPP
+			applicationId 'org.sphynx.emulator'
 			dimension "variant"
 			externalNativeBuild {
 				cmake {
@@ -150,7 +151,16 @@ android {
 				}
 			}
 			ndk {
-				abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+				// SPHYNX: per-ABI build.  We ship one APK per ARM ABI instead of a fat
+				// APK (this is the largest single size win: ~45% off the download).
+				// x86_64 is dropped on purpose: Sphynx targets ARM devices only.
+				// Pass -PsphynxAbi=arm64-v8a (or armeabi-v7a) to build one ABI.
+				def sphynxAbi = project.findProperty('sphynxAbi')
+				if (sphynxAbi != null && !sphynxAbi.isEmpty()) {
+					abiFilters(*sphynxAbi.split(','))
+				} else {
+					abiFilters 'armeabi-v7a', 'arm64-v8a'
+				}
 			}
 		}
 		gold {

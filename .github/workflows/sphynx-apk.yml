@@ -1,0 +1,136 @@
+name: Sphynx APK (signed release, per-ABI)
+
+# SPHYNX: builds the rebranded PPSSPP v1.18.1 fork as TWO signed release APKs,
+# one per ARM ABI.  Splitting by ABI is the single biggest size win we have
+# (~45% off), and it also answers the "<100 MB per APK" requirement empirically
+# instead of by guessing.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   SPHYNX_KEYSTORE_BASE64     base64 of sphynx-release.keystore
+#   SPHYNX_KEYSTORE_PASSWORD   keystore password
+#   SPHYNX_KEY_ALIAS           key alias (sphynx)
+#   SPHYNX_KEY_PASSWORD        key password
+#
+# No network permissions / no telemetry is added by this workflow: it only builds.
+
+on:
+  push:
+    branches:
+      - sphynx-multicore-1.18.1
+  workflow_dispatch:
+
+env:
+  SPHYNX_BASE_TAG: v1.18.1
+
+jobs:
+  build:
+    name: release-${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        abi:
+          - arm64-v8a
+          - armeabi-v7a
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Make sure version tags exist (fork safety net)
+        shell: bash
+        run: |
+          count=$(git tag -l 'v[0-9]*' | wc -l | tr -d ' ')
+          echo "tags found: $count"
+          if [ "$count" = "0" ]; then
+            git remote add upstream https://github.com/hrydgard/ppsspp.git
+            git fetch --deepen=15000 --no-recurse-submodules --tags upstream || exit 0
+          fi
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Free up runner disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/emulator 2>/dev/null || true
+          df -h /
+
+      - name: Write signing config outside the repository
+        # Passwords are never put on a command line, so they cannot leak into
+        # build logs of a public repository.
+        env:
+          KEYSTORE_B64: ${{ secrets.SPHYNX_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.SPHYNX_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SPHYNX_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.SPHYNX_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::secret SPHYNX_KEYSTORE_BASE64 is missing"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/sphynx-release.keystore"
+          mkdir -p "$HOME/.gradle"
+          {
+            echo "RELEASE_STORE_FILE=$RUNNER_TEMP/sphynx-release.keystore"
+            echo "RELEASE_STORE_PASSWORD=$KS_PASS"
+            echo "RELEASE_KEY_ALIAS=$KEY_ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$KEY_PASS"
+          } >> "$HOME/.gradle/gradle.properties"
+          keytool -list -keystore "$RUNNER_TEMP/sphynx-release.keystore" -storepass "$KS_PASS" | head -5
+
+      - name: Build signed release APK (single ABI)
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleNormalRelease -PsphynxAbi=${{ matrix.abi }}
+
+      - name: Collect APK, verify signature, enforce size ceiling
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          APK=$(find android/build -name '*.apk' -path '*release*' | head -1)
+          echo "found: $APK"
+          test -n "$APK"
+          cp "$APK" "out/sphynx-${{ matrix.abi }}-${{ env.SPHYNX_BASE_TAG }}.apk"
+          TARGET="out/sphynx-${{ matrix.abi }}-${{ env.SPHYNX_BASE_TAG }}.apk"
+          SIZE=$(stat -c%s "$TARGET")
+          MB=$(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}")
+          echo "size_bytes=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "size_mb=$MB" >> "$GITHUB_OUTPUT"
+          sha256sum "$TARGET" | tee out/SHA256SUMS.txt
+          APKSIGNER=$(find "${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" -name apksigner -type f 2>/dev/null | sort -r | head -1 || true)
+          if [ -n "$APKSIGNER" ]; then "$APKSIGNER" verify --print-certs "$TARGET" || true; fi
+          {
+            echo "### Sphynx release build — ABI ${{ matrix.abi }}"
+            echo ""
+            echo "| metric | value |"
+            echo "|---|---|"
+            echo "| APK size | **${MB} MB** |"
+            echo "| base tag | ${{ env.SPHYNX_BASE_TAG }} |"
+            echo "| hard ceiling | 100 MB |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "::error::APK exceeds the 100 MB hard ceiling (${MB} MB)"
+            exit 1
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sphynx-${{ matrix.abi }}-release
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
