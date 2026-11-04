@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPHYNX: brand colour of the adaptive icon background (upstream was #2D4553). -->
 <resources>
-    <color name="ic_launcher_background">#2D4553</color>
+    <color name="ic_launcher_background">#241A4E</color>
 </resources>
