@@ -1,0 +1,54 @@
+name: Sphynx host tests (fast, no Android SDK)
+
+# SPHYNX: unit/integration test of the external-core host layer.
+# Builds the same C++ that ships inside the APK with a plain host toolchain and
+# runs it against a stub libretro core, so a broken loader/detector/watchdog is
+# caught in seconds instead of after a 10-minute Android build.
+
+on:
+  push:
+    branches:
+      - sphynx-multicore-1.18.1
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build stub core + host test
+        run: |
+          set -eux
+          mkdir -p out
+          gcc -shared -fPIC -O2 -Iextcores/include -o out/libstub_core.so extcores/tests/stub_core.c
+          echo 'void sphynx_broken_core_placeholder(void) {}' > out/broken.c
+          gcc -shared -fPIC -o out/libbroken_core.so out/broken.c
+          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
+              -o out/sphynx_host_smoke \
+              extcores/src/system_db.cpp extcores/src/core_loader.cpp \
+              extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/tests/host_smoke.cpp -ldl
+
+      - name: Run host test
+        run: ./out/sphynx_host_smoke ./out/libstub_core.so ./out/libbroken_core.so | tee out/report.txt
+
+      - name: Publish report
+        if: always()
+        run: |
+          {
+            echo "### Sphynx external-core host test"
+            echo '```'
+            tail -n 30 out/report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sphynx-host-test-report
+          path: out/report.txt
+          retention-days: 14

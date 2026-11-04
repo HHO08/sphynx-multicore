@@ -1,0 +1,82 @@
+# ============================================================================
+#  Sphynx — extcores/CMakeLists.txt
+#
+#  Builds the external-core host as its own shared library so it can be loaded,
+#  replaced or dropped without touching the PSP build. Included by the root
+#  CMakeLists.txt through the SPHYNX_EXTCORE option (see the SPHYNX block at the
+#  bottom of that file).
+#
+#  NOTHING here links against, or is linked into, the PSP emulator core.
+#
+#  SPDX-License-Identifier: GPL-2.0-or-later
+# ============================================================================
+
+set(SPHYNX_EXTCORE_SOURCES
+	src/system_db.cpp
+	src/core_loader.cpp
+	src/env_callback.cpp
+	src/session.cpp
+)
+
+# JNI bridge is only meaningful on Android; it compiles to stubs elsewhere.
+if(ANDROID)
+	list(APPEND SPHYNX_EXTCORE_SOURCES jni/sphynx_extcore_jni.cpp)
+	set(SPHYNX_JNI TRUE)
+endif()
+
+add_library(sphynx_extcore SHARED ${SPHYNX_EXTCORE_SOURCES})
+
+target_include_directories(sphynx_extcore PRIVATE include)
+target_compile_features(sphynx_extcore PRIVATE cxx_std_17)
+set_target_properties(sphynx_extcore PROPERTIES
+	POSITION_INDEPENDENT_CODE ON
+	CXX_STANDARD 17
+	CXX_STANDARD_REQUIRED ON
+	# Ship without debug symbols in release builds (size rule of the project).
+	COMPILE_FLAGS "-fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections"
+	LINK_FLAGS "-Wl,--gc-sections"
+)
+
+if(SPHYNX_JNI)
+	target_compile_definitions(sphynx_extcore PRIVATE SPHYNX_ANDROID=1)
+	# liblog for the Android log, libdl for dlopen() of the cores.
+	find_library(SPHYNX_LOG_LIB log)
+	find_library(SPHYNX_DL_LIB dl)
+	if(SPHYNX_LOG_LIB)
+		target_link_libraries(sphynx_extcore PRIVATE ${SPHYNX_LOG_LIB})
+	endif()
+	if(SPHYNX_DL_LIB)
+		target_link_libraries(sphynx_extcore PRIVATE ${SPHYNX_DL_LIB})
+	endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Developer/CI test: a self-contained, host-toolchain build of the same code
+# plus a stub libretro core. Does not need the Android SDK, so CI can run it on
+# every push in under a second.
+#
+#   cmake -DSPHYNX_BUILD_TESTS=ON ..
+#   ctest -R sphynx
+# ---------------------------------------------------------------------------
+option(SPHYNX_BUILD_TESTS "Build the Sphynx host smoke test" OFF)
+
+if(SPHYNX_BUILD_TESTS)
+	add_library(sphynx_stub_core SHARED tests/stub_core.c)
+	target_include_directories(sphynx_stub_core PRIVATE include)
+	set_target_properties(sphynx_stub_core PROPERTIES PREFIX "lib" OUTPUT_NAME "stub_core")
+
+	add_executable(sphynx_host_smoke
+		tests/host_smoke.cpp
+		src/system_db.cpp
+		src/core_loader.cpp
+		src/env_callback.cpp
+		src/session.cpp
+	)
+	target_include_directories(sphynx_host_smoke PRIVATE include)
+	target_compile_features(sphynx_host_smoke PRIVATE cxx_std_17)
+	target_link_libraries(sphynx_host_smoke PRIVATE ${CMAKE_DL_LIBS})
+
+	add_test(NAME sphynx_host_smoke
+		COMMAND sphynx_host_smoke $<TARGET_FILE:sphynx_stub_core>
+		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endif()

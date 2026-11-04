@@ -3039,3 +3039,15 @@ if(UNIX AND NOT ANDROID AND NOT APPLE)
 		DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/mime/packages"
 	)
 endif()
+
+# ============================================================================
+#  SPHYNX block — multi-system host layer (APPENDED, never inserted)
+#
+#  Builds extcores/ as a separate shared library. It is not linked into the PSP
+#  core and can be disabled with -DSPHYNX_EXTCORE=OFF to obtain a byte-for-byte
+#  stock PPSSPP v1.18.1 build.
+# ============================================================================
+option(SPHYNX_EXTCORE "Build the Sphynx external-core host (multi-system support)" ON)
+if(SPHYNX_EXTCORE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extcores/CMakeLists.txt")
+	add_subdirectory(extcores)
+endif()
