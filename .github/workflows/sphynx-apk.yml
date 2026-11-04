@@ -21,6 +21,9 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.0
+  # PPSSPP scheme MNNPPBBBB (1.18.1) + Sphynx build counter -> always > upstream 118010001
+  SPHYNX_VERSION_CODE: '118010100'
 
 jobs:
   build:
@@ -93,7 +96,12 @@ jobs:
         shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleNormalRelease -PsphynxAbi=${{ matrix.abi }}
+          # SPHYNX: clean, stable version naming (the androidGitVersion plugin
+          # would otherwise bake the branch name into versionName).
+          ./gradlew --no-daemon --stacktrace assembleNormalRelease \
+            -PsphynxAbi=${{ matrix.abi }} \
+            -PANDROID_VERSION_NAME=${{ env.SPHYNX_VERSION_NAME }} \
+            -PANDROID_VERSION_CODE=${{ env.SPHYNX_VERSION_CODE }}
 
       - name: Collect APK, verify signature, enforce size ceiling
         id: collect
