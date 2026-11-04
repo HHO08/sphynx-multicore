@@ -83,7 +83,7 @@ android {
 		// properties, so a fork that has no release tags of its own would keep a
 		// versionName with the branch name baked into it.
 		if (project.hasProperty("ANDROID_VERSION_NAME")) {
-			versionCode ANDROID_VERSION_CODE
+			// SPHYNX: versionCode is intentionally left to the androidGitVersion plugin
 			versionName ANDROID_VERSION_NAME
 		}
 		signingConfig signingConfigs.debug
