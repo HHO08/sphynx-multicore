@@ -136,6 +136,21 @@ const CoreInfo *FindCore(const char *core_lib);
 int SystemCount();                                   // == 35, asserted by tests
 
 // ---------------------------------------------------------------------------
+// 2b. Bundled core binaries
+// ---------------------------------------------------------------------------
+// The .so files are shipped in the APK's native library directory and named
+// libsphynx_core_<buildbot name>.so. Names follow the libretro buildbot so the
+// download script and the registry can never drift apart.
+int BundledCoreCount();                       // 23 in this build
+const char *const *BundledCoreLibs();         // array of buildbot names
+// Registry name -> shipped file name ("mupen64plus_next" -> "..._gles2.so").
+const char *CoreLibraryFile(const char *core_lib);
+// Empty string when the system is known but its core is not shipped.
+std::string CoreLibraryPath(const std::string &native_library_dir, const char *core_lib);
+std::string CoreLibraryPathForSystem(const std::string &native_library_dir,
+                                     const char *system_key);
+
+// ---------------------------------------------------------------------------
 // 3. Content detection
 // ---------------------------------------------------------------------------
 

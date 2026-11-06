@@ -8,6 +8,7 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
 #include "sphynx_extcore.h"
+#include "libretro.h"   // RetroPad button ids for the synthetic START press
 #include "sphynx_ui_api.h"
 #include "png_write.h"
 
