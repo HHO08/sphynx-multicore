@@ -443,7 +443,7 @@ bool SelfCheck(std::string *report) {
 
 const char *BuildId() {
 	// Static storage: the caller may keep the pointer for the process lifetime.
-	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage1 (libretro ABI ") +
+	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI ") +
 	                        std::to_string(RETRO_API_VERSION) + ")";
 	return id.c_str();
 }
