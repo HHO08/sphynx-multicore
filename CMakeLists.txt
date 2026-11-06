@@ -3043,17 +3043,23 @@ endif()
 # ============================================================================
 #  SPHYNX block — multi-system host layer (APPENDED, never inserted)
 #
-#  Builds extcores/ as a separate shared library. It is not linked into the PSP
-#  core and can be disabled with -DSPHYNX_EXTCORE=OFF to obtain a byte-for-byte
-#  stock PPSSPP v1.18.1 build.
+#  Builds extcores/ as its own shared library and links it into the UI targets
+#  so the game list and the thumbnail cache can reach it. Disable with
+#  -DSPHYNX_EXTCORE=OFF to obtain a byte-for-byte stock PPSSPP v1.18.1 build.
 # ============================================================================
 option(SPHYNX_EXTCORE "Build the Sphynx external-core host (multi-system support)" ON)
 if(SPHYNX_EXTCORE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extcores/CMakeLists.txt")
 	add_subdirectory(extcores)
-	# SPHYNX: link the external-core host into the JNI library so the UI layer
-	# (game list, thumbnail cache) can call into it without a second JNI hop.
-	# The PSP emulator itself never calls these symbols.
-	if(TARGET sphynx_extcore AND TARGET ${CoreLibName})
-		target_link_libraries(${CoreLibName} sphynx_extcore)
+	if(TARGET sphynx_extcore)
+		# UI sources (MainScreen, GameInfoCache) are compiled into the static
+		# 'native' target; the JNI shared library links it.
+		if(TARGET native)
+			target_include_directories(native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/extcores/include")
+			target_link_libraries(native sphynx_extcore)
+		endif()
+		if(TARGET ${CoreLibName})
+			target_include_directories(${CoreLibName} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/extcores/include")
+			target_link_libraries(${CoreLibName} sphynx_extcore)
+		endif()
 	endif()
 endif()
