@@ -141,6 +141,10 @@ jobs:
           # Save state / Load state / Settings.
           python3 Tools/sphynx/check_routing.py . | tee out/routing-check.txt
 
+          # Stage 6: the NDK's clang rejects a C++ return type inside an
+          # extern "C" block (GCC does not warn, so this cost a whole build).
+          python3 Tools/sphynx/check_linkage.py . | tee out/linkage-check.txt
+
       - name: Write signing config outside the repository
         env:
           KEYSTORE_B64: ${{ secrets.SPHYNX_KEYSTORE_BASE64 }}

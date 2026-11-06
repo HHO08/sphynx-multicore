@@ -504,6 +504,10 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeReleaseAll(JNIEnv *, jclass) {
 //
 // Returns "" on success, or the reason in plain words (shown as a toast).
 
+}  // extern "C" — closed only so the helpers below can be real C++ again:
+   // clang refuses a std::string return value inside an extern "C" block
+   // (-Wreturn-type-c-linkage), which is exactly what the APK build uses.
+
 namespace {
 
 std::string SaveStateToSlot(int slot) {
@@ -540,6 +544,8 @@ std::string LoadStateFromSlot(int slot) {
 }
 
 }  // namespace
+
+extern "C" {
 
 JNIEXPORT jstring JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeSaveState(JNIEnv *env, jclass, jint slot) {

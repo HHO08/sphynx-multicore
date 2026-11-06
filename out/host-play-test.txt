@@ -1,0 +1,37 @@
+Sphynx play test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
+workspace: /tmp/sphynx_play_liP2JF
+[1] Android URI -> file resolution
+  PASS document id extracted from a tree URI
+  PASS document id decoded (id=primary:PSP/GAME/Ys III (USA).sfc)
+  PASS document id mapped
+  PASS primary: volume maps to emulated/0 (got /tmp/sphynx_play_liP2JF/storage/emulated/0/PSP/GAME/Ys III (USA).sfc)
+  PASS raw: document id maps through
+  PASS SD-card volume maps to its UUID mount
+  PASS Downloads/media ids are reported as unmappable (they need a copy)
+  PASS display name from a URI
+  PASS display name from a path
+  PASS LocalPathFor() resolves the whole URI
+[2] game-list classification
+  PASS a plain .sfc file is an external system
+  PASS the same game via content:// is recognised
+  PASS archives stay with PPSSPP
+  PASS PSP files are never hijacked
+  PASS listing filter contains .sfc
+[3] thumbnail rendered by the game's own core
+  PASS thumbnail generated (ok (frame 30))
+  PASS thumbnail has data
+  PASS thumbnail is a valid PNG
+  PASS thumbnail has an IHDR chunk
+  PASS thumbnail generated from a content:// URI (ok (frame 30))
+  PASS URI thumbnail is a valid PNG
+[4] player session (frames, audio, input, save state)
+  PASS session starts on a resolved file path
+  PASS 60 frames reached the frame sink
+  PASS frame size is the core's geometry
+  PASS audio reached the audio sink
+  PASS core exposes a save state
+  PASS save state written
+  PASS save state restored
+  PASS session stops cleanly
+
+29 checks, 0 failure(s) — all good

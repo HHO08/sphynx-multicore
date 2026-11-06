@@ -1,0 +1,95 @@
+Sphynx external-core host test
+sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1)
+
+[1] registry self-check
+systems=35 cores=23 bundled=23
+  [ ok ] SelfCheck() passes
+  [ ok ] exactly 35 systems (got 35)
+  [ ok ] system 'nes' exists
+  [ ok ] system 'fds' exists
+  [ ok ] system 'gb' exists
+  [ ok ] system 'gbc' exists
+  [ ok ] system 'gba' exists
+  [ ok ] system 'n64' exists
+  [ ok ] system 'nds' exists
+  [ ok ] system 'snes' exists
+  [ ok ] system 'genesis' exists
+  [ ok ] system '32x' exists
+  [ ok ] system 'segacd' exists
+  [ ok ] system 'saturn' exists
+  [ ok ] system 'dreamcast' exists
+  [ ok ] system 'sms' exists
+  [ ok ] system 'gg' exists
+  [ ok ] system 'picodrive_pico' exists
+  [ ok ] system '3do' exists
+  [ ok ] system 'amiga' exists
+  [ ok ] system 'arcade' exists
+  [ ok ] system 'msx' exists
+  [ ok ] system 'ws' exists
+  [ ok ] system 'wsc' exists
+  [ ok ] system 'coleco' exists
+  [ ok ] system 'psx' exists
+  [ ok ] system 'pc88' exists
+  [ ok ] system 'pc98' exists
+  [ ok ] system 'pcfx' exists
+  [ ok ] system 'pce' exists
+  [ ok ] system 'pcecd' exists
+  [ ok ] system 'dos' exists
+  [ ok ] system 'scummvm' exists
+  [ ok ] system 'neogeocd' exists
+  [ ok ] system 'ngp' exists
+  [ ok ] system 'ngpc' exists
+  [ ok ] PSP is not an external core entry
+
+[2] content detection
+  [ ok ] detect game.cso -> matched
+  [ ok ] detect EBOOT.pbp -> matched
+  [ ok ] detect game.iso -> matched
+  [ ok ] detect mario.nes -> matched
+  [ ok ] detect disk.fds -> matched
+  [ ok ] detect zelda.n64 -> matched
+  [ ok ] detect sega.md -> matched
+  [ ok ] detect knuckles.32x -> matched
+  [ ok ] detect pico.bin -> matched
+  [ ok ] detect iso3do.iso -> matched
+  [ ok ] detect pokemon.gba -> matched
+  [ ok ] detect tetris.gb -> matched
+  [ ok ] detect colour.gbc -> matched
+  [ ok ] detect nsmb.nds -> matched
+  [ ok ] detect disc.cue -> matched
+  [ ok ] detect data.gdi -> matched
+  [ ok ] detect jewel.ngc -> matched
+  [ ok ] PSP ISO recognised by volume descriptor
+  [ ok ] unknown extension yields no candidate
+
+[3] loader + session with a real .so
+  [ ok ] dlopen + all symbols ()
+  [ ok ] core reports its name: Sphynx Stub
+  [ ok ] core reports extensions: stub|gb
+  [ ok ] core ABI matches host
+  [ ok ] session.Start() 
+  [ ok ] 180 frames delivered (got 180)
+  [ ok ] frame geometry 160x144 reported
+  [ ok ] pitch reported correctly
+  [ ok ] audio pumped: 132300 frames
+  [ ok ] stats counted 180 frames
+  [ ok ] environment captured AV info
+  [info] 180 stub frames in 0.7 ms (0.004 ms/frame)
+  [ ok ] core reports a 64-byte state
+  [ ok ] SaveState() produced 64 bytes
+  [ ok ] LoadState() accepted its own snapshot
+  [ ok ] LoadState() rejects a foreign snapshot
+  [ ok ] frames are non-empty
+  [ ok ] session stopped cleanly
+
+[4] failure paths are graceful
+  [ ok ] missing core -> error, not a crash
+  [ ok ] error message is set: cannot load /nonexistent/libnope.so: /nonexistent/libnope.so: cannot open shared object file: No such file or directory
+  [ ok ] broken core -> refused: missing symbol retro_init in ./out/libbroken_core.so
+
+[5] watchdog
+  [ ok ] watchdog tripped on a 10 ms budget (frame was 0.004196 ms before the delay)
+  [ ok ] watchdog trip counted
+  [ ok ] watchdog reason: core exceeded the frame budget (possible hang)
+
+==== 79 checks, 0 failures ====

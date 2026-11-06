@@ -1,0 +1,27 @@
+Sphynx UI bridge host test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
+[1] extension filter
+  PASS extension filter is not empty
+  PASS filter lists .nes
+  PASS filter lists .gba
+  PASS filter lists .md (Genesis)
+  PASS filter lists .sfc (SNES)
+  PASS filter still lists .iso (PSP)
+  PASS filter still lists .pbp (PSP)
+  PASS filter contains every extension of every system
+[2] archive routing
+  PASS .zip is not routed to a core
+  PASS .7z is not routed to a core
+  PASS empty path is rejected
+[3] ambiguous formats
+  PASS ambiguous .cue yields candidates
+  PASS candidate strings carry a display name
+  PASS empty path yields no candidates
+[4] PNG encoder
+  PASS PNG encoder produced data
+  PASS PNG signature
+  PASS IHDR first chunk
+  PASS PNG width is 16
+  PASS PNG height is 16
+  PASS PNG encoder rejects empty input
+
+all checks passed

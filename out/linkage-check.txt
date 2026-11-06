@@ -1,0 +1,1 @@
+c-linkage check: 7 files with extern "C" blocks, no C++ types escaped

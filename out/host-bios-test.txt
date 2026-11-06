@@ -1,0 +1,68 @@
+Sphynx BIOS/state test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
+workspace: /tmp/sphynx_bios_NlPjih
+
+[BIOS registry]
+  ok    exactly 16 systems have a BIOS folder
+  ok    12 of them cannot run without a BIOS
+  ok    4 of them only work better with one
+  ok    every folder name is unique
+  ok    every BIOS folder belongs to a real system that declares a BIOS
+  ok    NES has no BIOS folder
+  ok    SNES has no BIOS folder
+  ok    GBA has no BIOS folder
+  ok    Genesis has no BIOS folder
+  ok    PSP has no BIOS folder
+  ok    PlayStation has a BIOS folder
+  ok    Saturn has a BIOS folder
+  ok    Dreamcast has a (recommended) folder
+
+[BIOS tree is created]
+  ok    the tree lives in PSP/SYSTEMS_BIOS
+  ok    the first run creates all 16 folders
+  ok    the SYSTEMS_BIOS folder exists
+  ok    a top level README is written
+  ok    one folder per BIOS system
+  ok    each folder explains which files it wants
+  ok    the Saturn README names both region BIOS files
+  ok    and says the BIOS is required
+  ok    Dreamcast is marked optional
+  ok    a second run creates nothing (idempotent)
+  ok    a README the user edited is never overwritten
+
+[BIOS detection + adoption from PSP/SYSTEM]
+  ok    an empty PSX folder reports scph5501.bin
+  ok    status starts with 'missing'
+  ok    one PSX BIOS file is enough (regions are alternatives)
+  ok    status becomes complete
+  ok    a system without BIOS says so instead of complaining
+  ok    two BIOS files were adopted from PSP/SYSTEM
+  ok    the Saturn BIOS arrived in its own folder
+  ok    the ColecoVision BIOS arrived in its own folder
+  ok    the original file is left where it was (copy, not move)
+  ok    adoption does not run twice
+  ok    adopting a BIOS makes the system complete
+
+[UI/Java bridge]
+  ok    sphynx_ui_bios_root() returns PSP/SYSTEMS_BIOS
+  ok    sphynx_ui_ensure_bios_tree() succeeds
+  ok    the PlayStation folder is handed to the core as its system directory
+  ok    a system without BIOS gets no folder (the caller falls back to PSP/SYSTEM)
+  ok    the bridge reports the 3DO BIOS as missing
+  ok    MSX reports its (optional) files as missing until they exist
+
+[save states]
+  ok    the slot path has the expected shape
+  ok    a state is written
+  ok    the same state is read back
+  ok    the payload survives the round trip byte for byte
+  ok    a state from another system is refused
+  ok    and the reason is readable
+  ok    a corrupted state is refused
+  ok    with a checksum message
+  ok    an empty slot refuses to load
+  ok    and explains that the slot is empty
+  ok    hasState() reports it empty
+  ok    hasState() reports the written slot as used
+  ok    an empty snapshot is rejected
+
+54 checks, 0 failure(s) — all good
