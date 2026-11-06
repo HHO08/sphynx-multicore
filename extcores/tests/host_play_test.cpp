@@ -26,6 +26,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <limits.h>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -141,7 +142,11 @@ void TestThumbnail(const std::string &stub_core, const std::string &nativelib,
 	// exactly as on the device. The stub stands in for bsnes here.
 	const std::string link = nativelib + "/libsphynx_core_bsnes.so";
 	::unlink(link.c_str());
-	if (::symlink(stub_core.c_str(), link.c_str()) != 0) {
+	// Absolute target: CI passes a relative "./out/libstub_core.so" and a
+	// relative symlink would resolve against the temp directory instead.
+	char resolved[4096];
+	const std::string target = realpath(stub_core.c_str(), resolved) ? std::string(resolved) : stub_core;
+	if (::symlink(target.c_str(), link.c_str()) != 0) {
 		Check(false, "could not place the stub core in the native lib dir");
 		return;
 	}
