@@ -254,6 +254,9 @@ void EmuScreen::bootGame(const Path &filename) {
 		if (!bootPending_) {
 			invalid_ = !PSP_IsInited();
 			if (invalid_) {
+				// SPHYNX: the PSP loader refused the file; the player may still
+				// be able to run it (see the second-chance block in update()).
+				sphynxBootFailed_ = true;
 				errorMessage_ = error_string;
 				ERROR_LOG(Log::Boot, "isIniting bootGame error: %s", errorMessage_.c_str());
 				return;
@@ -348,6 +351,9 @@ void EmuScreen::bootGame(const Path &filename) {
 	if (!PSP_InitStart(coreParam, &error_string)) {
 		bootPending_ = false;
 		invalid_ = true;
+		// SPHYNX: "Failed initializing CPU or memory" lands here. Flag it so the
+		// next update() can route a non-PSP file to the player instead.
+		sphynxBootFailed_ = true;
 		errorMessage_ = error_string;
 		ERROR_LOG(Log::Boot, "InitStart bootGame error: %s", errorMessage_.c_str());
 	}
@@ -1189,6 +1195,17 @@ void EmuScreen::update() {
 	if (!sphynxRouted_) {
 		sphynxRouted_ = true;
 		if (SphynxRouteExternal(screenManager(), gamePath_)) {
+			screenManager()->switchScreen(new MainScreen());
+			return;
+		}
+	}
+
+	// SPHYNX: second chance. The PSP loader has now actually refused this file
+	// ("Failed initializing CPU or memory"). If the file cannot be a PSP disc,
+	// it belongs to another system: open the player instead of the error.
+	if (sphynxBootFailed_) {
+		sphynxBootFailed_ = false;
+		if (SphynxRouteBootFailure(gamePath_)) {
 			screenManager()->switchScreen(new MainScreen());
 			return;
 		}

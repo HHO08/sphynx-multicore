@@ -99,6 +99,22 @@ def main(root: str) -> int:
 
     print(f"  guarded EmuScreen sites: {guarded_sites}, unguarded: {unguarded_sites}")
 
+    # 3b. the two safety nets this stage added
+    emu = (repo / "UI" / "EmuScreen.cpp").read_text(encoding="utf-8", errors="surrogateescape")
+    if "sphynxBootFailed_" not in emu:
+        problems.append("UI/EmuScreen.cpp lost the boot-failure flag")
+    if "SphynxRouteBootFailure(gamePath_)" not in emu:
+        problems.append("UI/EmuScreen.cpp lost the second-chance routing")
+    if "bool SphynxRouteBootFailure(const Path &path) {" not in main_screen:
+        problems.append("UI/MainScreen.cpp does not define SphynxRouteBootFailure()")
+    if "sphynx_ui_launch_player" not in main_screen:
+        problems.append("UI/MainScreen.cpp does not open the player from native code")
+    if "sphynx_ui_log_line" not in main_screen:
+        problems.append("UI/MainScreen.cpp does not record routing decisions in the log")
+    for rel in ("extcores/jni/sphynx_launch_jni.cpp", "extcores/src/diag_log.cpp"):
+        if not (repo / rel).exists():
+            problems.append(f"{rel} is missing")
+
     # 4. the BIOS tree is built at start-up on both sides of the bridge
     native_app = (repo / "UI" / "NativeApp.cpp").read_text(encoding="utf-8", errors="surrogateescape")
     if "sphynx_ui_ensure_bios_tree" not in native_app:

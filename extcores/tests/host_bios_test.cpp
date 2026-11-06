@@ -21,6 +21,7 @@
 #include "sphynx_ui_api.h"
 #include "bios_layout.h"
 #include "state_file.h"
+#include "diag_log.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -282,6 +283,47 @@ void TestSaveStates() {
 	Check(!sphynx::WriteStateFile(path, "snes9x", {}, &err), "an empty snapshot is rejected");
 }
 
+// ---------------------------------------------------------------------------
+//  4. The flight recorder (PSP/sphynx_log.txt)
+// ---------------------------------------------------------------------------
+void TestDiagLog() {
+	std::printf("\n[diagnostic log]\n");
+	const std::string path = g_root + "/memstick/sphynx_log.txt";
+	sphynx::SetLogPath(path);
+	Check(sphynx::LogPath() == path, "the log path is remembered");
+
+	sphynx::LogLine("hello from the test");
+	sphynx::Logf("value = %d", 42);
+	const std::string text = sphynx::ReadLog();
+	Check(text.find("hello from the test") != std::string::npos, "a line reaches the file");
+	Check(text.find("value = 42") != std::string::npos, "formatted lines work");
+	Check(text.find("20") != std::string::npos, "lines carry a timestamp");
+
+	// The log must stop growing instead of filling the user's storage.
+	for (int i = 0; i < 4000; ++i)
+		sphynx::LogLine(std::string(120, 'x'));
+	struct stat st;
+	::stat(path.c_str(), &st);
+	Check(st.st_size <= 80 * 1024, "the log truncates itself instead of growing forever");
+	Check(sphynx::LogPath() == path, "and stays usable after truncation");
+}
+
+// ---------------------------------------------------------------------------
+//  5. How a tap is routed, decided from the file name alone
+// ---------------------------------------------------------------------------
+void TestExtensionRouting() {
+	std::printf("\n[extension routing]\n");
+	sphynx_ui_set_memstick((g_root + "/memstick").c_str());
+	Check(sphynx_ui_is_known_extension("/x/Ys III (USA).sfc") == 1, ".sfc is a Sphynx extension");
+	Check(sphynx_ui_is_known_extension("/x/game.gba") == 1, ".gba is a Sphynx extension");
+	Check(sphynx_ui_is_known_extension("/x/game.SFC") == 1, "the check is case insensitive");
+	Check(sphynx_ui_is_known_extension("/x/game.unknownxyz") == 0, "an unknown extension is not claimed");
+	Check(sphynx_ui_is_known_extension("/x/game") == 0, "a file without an extension is not claimed");
+	// The player screen cannot be opened from a host binary: the caller falls
+	// back to the command queue, so this must answer 0, never crash.
+	Check(sphynx_ui_launch_player("/x/game.sfc") == 0, "no Context on the host: launch reports 0");
+}
+
 }  // namespace
 
 int main() {
@@ -301,6 +343,8 @@ int main() {
 	TestMissingAndAdoption();
 	TestUiApi();
 	TestSaveStates();
+	TestDiagLog();
+	TestExtensionRouting();
 
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");

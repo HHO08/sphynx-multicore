@@ -27,12 +27,16 @@ set(SPHYNX_EXTCORE_SOURCES
 	src/bios_layout.cpp
 	# Save states on disk: header + core tag + checksum.
 	src/state_file.cpp
+	# Flight recorder: PSP/sphynx_log.txt.
+	src/diag_log.cpp
 )
 
 # JNI bridge is only meaningful on Android; it compiles to stubs elsewhere.
 if(ANDROID)
 	list(APPEND SPHYNX_EXTCORE_SOURCES
 		jni/sphynx_extcore_jni.cpp
+		# Opens the player screen from native code (no command-queue hop).
+		jni/sphynx_launch_jni.cpp
 		src/player_android.cpp)
 	set(SPHYNX_JNI TRUE)
 endif()
@@ -116,6 +120,7 @@ if(SPHYNX_BUILD_TESTS)
 		src/android_paths.cpp
 		src/bios_layout.cpp
 		src/state_file.cpp
+		src/diag_log.cpp
 	)
 	target_include_directories(sphynx_host_play PRIVATE include src)
 	target_compile_features(sphynx_host_play PRIVATE cxx_std_17)
@@ -137,6 +142,7 @@ if(SPHYNX_BUILD_TESTS)
 		src/android_paths.cpp
 		src/bios_layout.cpp
 		src/state_file.cpp
+		src/diag_log.cpp
 	)
 	target_include_directories(sphynx_host_bios PRIVATE include src)
 	target_compile_features(sphynx_host_bios PRIVATE cxx_std_17)

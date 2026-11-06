@@ -27,6 +27,7 @@
 // exactly the code that ships.
 #include "state_file.h"
 #include "bios_layout.h"
+#include "diag_log.h"
 
 #ifdef SPHYNX_ANDROID
 
@@ -401,6 +402,8 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeStart(JNIEnv *env, jclass, jstring j
 	std::string err;
 	if (!session->Start(core, content, sysdir, savedir, &err)) {
 		PERR("start failed: %s (core=%s content=%s)", err.c_str(), core.c_str(), content.c_str());
+		sphynx::Logf("PLAYER: start failed: %s | core=%s | content=%s | bios=%s", err.c_str(),
+		             core.c_str(), content.c_str(), sysdir.c_str());
 		g_error = err;
 		return env->NewStringUTF(err.c_str());
 	}
@@ -418,6 +421,9 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeStart(JNIEnv *env, jclass, jstring j
 	}
 	PLOG("session started: core=%s content=%s %.0f Hz", core.c_str(), content.c_str(),
 	     session->SampleRate());
+	sphynx::Logf("PLAYER: running %s (%s) at %.0f Hz, BIOS folder %s", content.c_str(),
+	             g_system_key.empty() ? "?" : g_system_key.c_str(), session->SampleRate(),
+	             sysdir.c_str());
 	return nullptr;
 }
 
@@ -522,8 +528,12 @@ std::string SaveStateToSlot(int slot) {
 		return "this system does not support save states";
 	std::string err;
 	const std::string path = sphynx::StateFilePath(g_save_dir, g_game_tag, slot);
-	if (!sphynx::WriteStateFile(path, g_core_tag, state, &err)) return err;
+	if (!sphynx::WriteStateFile(path, g_core_tag, state, &err)) {
+		sphynx::Logf("SAVESTATE: write failed: %s", err.c_str());
+		return err;
+	}
 	PLOG("state saved: %s (%zu bytes)", path.c_str(), state.size());
+	sphynx::Logf("SAVESTATE: saved slot %d (%zu bytes) -> %s", slot, state.size(), path.c_str());
 	return std::string();
 }
 

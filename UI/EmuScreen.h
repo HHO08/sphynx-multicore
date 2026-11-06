@@ -86,6 +86,9 @@ private:
 	// SPHYNX: set once this screen has checked whether the file is really
 	// a PSP game, so the check runs exactly once per screen.
 	bool sphynxRouted_ = false;
+	// SPHYNX: set when the PSP loader itself refused the file, so the next
+	// update can hand it to the player instead of showing the CPU error.
+	bool sphynxBootFailed_ = false;
 	Path gamePath_;
 
 	// Something invalid was loaded, don't try to emulate

@@ -79,27 +79,61 @@ def patch_mainscreen(repo: Path) -> None:
         "// place that can start a game: LaunchFile(), GameScreen::OnPlay(), the\n"
         "// boot-from-intent paths in MiscScreens.cpp / NativeApp.cpp, and as a last\n"
         "// line of defence from EmuScreen::update().\n"
-        "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {\n"
-        "\t// Local covers plain files and Android content:// URIs alike: a game\n"
-        "\t// picked through the Storage Access Framework is a CONTENT_URI, and a\n"
-        "\t// check for PathType::NATIVE silently skipped every one of those.\n"
-        "\tif (!path.IsLocalType())\n"
-        "\t\treturn false;\n"
-        "\tconst std::string sphynxPath = path.ToString();\n"
-        "\tif (sphynx_ui_is_external(sphynxPath.c_str()) != 1)\n"
-        "\t\treturn false;\n"
+        "//\n"
+        "// Every decision is written to PSP/sphynx_log.txt, so a device that still\n"
+        "// misbehaves leaves a record of exactly which test failed instead of a\n"
+        "// screenshot of an error message.\n"
+        "static bool SphynxLaunchPlayer(const std::string &path, const char *reason) {\n"
+        "	sphynx_ui_log_line((std::string(\"route: \") + reason + \" -> \" + path).c_str());\n"
         "#if PPSSPP_PLATFORM(ANDROID)\n"
-        "\t// The player screen is Java-side: ask the app shell to open it.\n"
-        "\tSphynx_SendCommandToJava(\"sphynx_launch\", sphynxPath.c_str());\n"
-        "\t(void)screenManager;\n"
-        "\treturn true;\n"
+        "	// Preferred: build and start the Intent from native code. It does not depend\n"
+        "	// on PPSSPP's per-frame command queue being alive at this instant.\n"
+        "	const int launched = sphynx_ui_launch_player(path.c_str());\n"
+        "	if (launched == 1)\n"
+        "		return true;\n"
+        "	// Fallback: the queue drained by NativeActivity a few milliseconds later.\n"
+        "	Sphynx_SendCommandToJava(\"sphynx_launch\", path.c_str());\n"
+        "	return true;\n"
         "#else\n"
-        "\t// Desktop builds ship no player screen: let the caller do what it always\n"
-        "\t// did instead of swallowing the request.\n"
-        "\t(void)screenManager;\n"
-        "\treturn false;\n"
+        "	return false;\n"
         "#endif\n"
-        "}\n\n")
+        "}\n"
+        "\n"
+        "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {\n"
+        "	// Local covers plain files and Android content:// URIs alike: a game picked\n"
+        "	// through the Storage Access Framework is a CONTENT_URI, and a check for\n"
+        "	// PathType::NATIVE silently skipped every one of those.\n"
+        "	if (!path.IsLocalType())\n"
+        "		return false;\n"
+        "	const std::string sphynxPath = path.ToString();\n"
+        "	const int external = sphynx_ui_is_external(sphynxPath.c_str());\n"
+        "	if (external != 1) {\n"
+        "		if (external == -1)\n"
+        "			sphynx_ui_log_line((\"route: not classified as a game -> \" + sphynxPath).c_str());\n"
+        "		return false;\n"
+        "	}\n"
+        "	(void)screenManager;\n"
+        "	return SphynxLaunchPlayer(sphynxPath, \"detected as an external system\");\n"
+        "}\n"
+        "\n"
+        "// SPHYNX: second chance, used when the PSP loader has already refused a file.\n"
+        "//\n"
+        "// If booting failed and the file cannot be a PSP disc by its extension, it\n"
+        "// almost certainly belongs to another system and a detection detail was the\n"
+        "// only thing standing in the way. Handing it to the player here means the user\n"
+        "// never sees \"Failed initializing CPU or memory\" for a non-PSP game again.\n"
+        "bool SphynxRouteBootFailure(const Path &path) {\n"
+        "	if (!path.IsLocalType())\n"
+        "		return false;\n"
+        "	const std::string sphynxPath = path.ToString();\n"
+        "	if (sphynx_ui_is_external(sphynxPath.c_str()) == 1)\n"
+        "		return SphynxLaunchPlayer(sphynxPath, \"PSP loader refused it, detected as external\");\n"
+        "	if (sphynx_ui_is_known_extension(sphynxPath.c_str()) == 1)\n"
+        "		return SphynxLaunchPlayer(sphynxPath, \"PSP loader refused it, known Sphynx extension\");\n"
+        "	sphynx_ui_log_line((\"route: PSP loader refused an unknown file (left to PPSSPP) -> \" + sphynxPath).c_str());\n"
+        "	return false;\n"
+        "}\n"
+        "\n")
     head = "bool LaunchFile(ScreenManager *screenManager, const Path &path) {"
     if "bool SphynxRouteExternal(ScreenManager *screenManager" in s:
         print("  == MainScreen: routing helper already present")
@@ -149,7 +183,11 @@ def patch_mainscreen_header(repo: Path) -> None:
     decl = (anchor + "\n\n"
             "// SPHYNX: true when the file belongs to an external system and the player\n"
             "// screen took over; false when the caller must run its normal PSP flow.\n"
-            "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path);")
+            "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path);\n\n"
+            "// SPHYNX: same, but called after the PSP loader already refused the file:\n"
+            "// anything that is not a PSP disc by extension is handed to the player instead\n"
+            "// of showing \"Failed initializing CPU or memory\".\n"
+            "bool SphynxRouteBootFailure(const Path &path);")
     s = s.replace(anchor, decl, 1)
     _write(f, s)
     print("  ok MainScreen.h: SphynxRouteExternal() declared")
@@ -301,7 +339,7 @@ def patch_emuscreen(repo: Path) -> None:
     """Last line of defence: an EmuScreen created by a path we did not patch."""
     h = repo / "UI" / "EmuScreen.h"
     s = _read(h)
-    if "sphynxRouted_" in s:
+    if "sphynxBootFailed_" in s:
         print("  == EmuScreen.h: guard flag already present")
     else:
         anchor = "\tbool bootPending_ = true;\n\tPath gamePath_;"
@@ -310,6 +348,9 @@ def patch_emuscreen(repo: Path) -> None:
                    "\t// SPHYNX: set once this screen has checked whether the file is really\n"
                    "\t// a PSP game, so the check runs exactly once per screen.\n"
                    "\tbool sphynxRouted_ = false;\n"
+                   "\t// SPHYNX: set when the PSP loader itself refused the file, so the next\n"
+                   "\t// update can hand it to the player instead of showing the CPU error.\n"
+                   "\tbool sphynxBootFailed_ = false;\n"
                    "\tPath gamePath_;")
             s = s.replace(anchor, new, 1)
             _write(h, s)
@@ -324,6 +365,30 @@ def patch_emuscreen(repo: Path) -> None:
         return
     anchor = ("void EmuScreen::update() {\n"
               "\tusing namespace UI;\n")
+    # The two places where the PSP loader gives up: record it.
+    for old_flag, new_flag in [
+        ("\t\t\tif (invalid_) {\n\t\t\t\terrorMessage_ = error_string;",
+         "\t\t\tif (invalid_) {\n"
+         "\t\t\t\t// SPHYNX: the PSP loader refused the file; the player may still\n"
+         "\t\t\t\t// be able to run it (see the second-chance block in update()).\n"
+         "\t\t\t\tsphynxBootFailed_ = true;\n"
+         "\t\t\t\terrorMessage_ = error_string;"),
+        ("\tif (!PSP_InitStart(coreParam, &error_string)) {\n"
+         "\t\tbootPending_ = false;\n\t\tinvalid_ = true;\n\t\terrorMessage_ = error_string;",
+         "\tif (!PSP_InitStart(coreParam, &error_string)) {\n"
+         "\t\tbootPending_ = false;\n\t\tinvalid_ = true;\n"
+         "\t\t// SPHYNX: \"Failed initializing CPU or memory\" lands here. Flag it so\n"
+         "\t\t// the next update() can route a non-PSP file to the player instead.\n"
+         "\t\tsphynxBootFailed_ = true;\n\t\terrorMessage_ = error_string;"),
+    ]:
+        if new_flag in s:
+            continue
+        if old_flag in s:
+            s = s.replace(old_flag, new_flag, 1)
+            print("  ok EmuScreen: boot-failure flag recorded")
+        else:
+            print("  !! EmuScreen: boot-failure anchor not found")
+
     guard = (anchor + "\n"
              "\t// SPHYNX: last line of defence. Every launch path routes through\n"
              "\t// SphynxRouteExternal() before this screen is even created; this block\n"
@@ -332,6 +397,16 @@ def patch_emuscreen(repo: Path) -> None:
              "\tif (!sphynxRouted_) {\n"
              "\t\tsphynxRouted_ = true;\n"
              "\t\tif (SphynxRouteExternal(screenManager(), gamePath_)) {\n"
+             "\t\t\tscreenManager()->switchScreen(new MainScreen());\n"
+             "\t\t\treturn;\n"
+             "\t\t}\n"
+             "\t}\n\n"
+             "\t// SPHYNX: second chance. The PSP loader has now actually refused this\n"
+             "\t// file (\"Failed initializing CPU or memory\"). If it cannot be a PSP disc,\n"
+             "\t// it belongs to another system: open the player instead of the error.\n"
+             "\tif (sphynxBootFailed_) {\n"
+             "\t\tsphynxBootFailed_ = false;\n"
+             "\t\tif (SphynxRouteBootFailure(gamePath_)) {\n"
              "\t\t\tscreenManager()->switchScreen(new MainScreen());\n"
              "\t\t\treturn;\n"
              "\t\t}\n"

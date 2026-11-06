@@ -74,7 +74,7 @@ systems=35 cores=23 bundled=23
   [ ok ] audio pumped: 132300 frames
   [ ok ] stats counted 180 frames
   [ ok ] environment captured AV info
-  [info] 180 stub frames in 0.7 ms (0.004 ms/frame)
+  [info] 180 stub frames in 0.8 ms (0.004 ms/frame)
   [ ok ] core reports a 64-byte state
   [ ok ] SaveState() produced 64 bytes
   [ ok ] LoadState() accepted its own snapshot
@@ -88,7 +88,7 @@ systems=35 cores=23 bundled=23
   [ ok ] broken core -> refused: missing symbol retro_init in ./out/libbroken_core.so
 
 [5] watchdog
-  [ ok ] watchdog tripped on a 10 ms budget (frame was 0.004196 ms before the delay)
+  [ ok ] watchdog tripped on a 10 ms budget (frame was 0.004211 ms before the delay)
   [ ok ] watchdog trip counted
   [ ok ] watchdog reason: core exceeded the frame budget (possible hang)
 

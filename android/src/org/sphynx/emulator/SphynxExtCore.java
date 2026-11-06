@@ -135,10 +135,23 @@ public final class SphynxExtCore {
 	 */
 	public static void ensureBiosTree(Context context) {
 		if (!isAvailable()) return;
-		String memstick = memstickDir(context);
-		nativeSetMemstick(memstick);
-		int made = nativeEnsureBiosTree(memstick);
-		Log.i(TAG, "BIOS tree at " + nativeBiosRoot() + " (" + made + " new folders)");
+		// Create the tree in every PSP folder that actually exists on this
+		// device, best candidate first. The user asked for the folders to be
+		// there as soon as the app is opened, wherever their PSP folder lives:
+		// /sdcard/PSP, /sdcard/Android/media/PSP, or a folder PPSSPP chose.
+		java.util.LinkedHashSet<String> roots = new java.util.LinkedHashSet<>();
+		roots.add(memstickDir(context));
+		File external = Environment.getExternalStorageDirectory();
+		roots.add(new File(external, "PSP").getAbsolutePath());
+		roots.add(new File(external, "Android/media/PSP").getAbsolutePath());
+		for (String root : roots) {
+			if (root == null || root.isEmpty()) continue;
+			File dir = new File(root);
+			if (!dir.isDirectory()) continue;      // never invent a folder the user does not have
+			nativeSetMemstick(root);
+			int made = nativeEnsureBiosTree(root);
+			Log.i(TAG, "BIOS tree at " + nativeBiosRoot() + " (" + made + " new folders)");
+		}
 	}
 
 	public static String biosRoot() {
@@ -176,9 +189,20 @@ public final class SphynxExtCore {
 		return isAvailable() ? nativeBiosHint(systemKey) : "";
 	}
 
-	/** The app context is only used to copy content:// files into the cache. */
+	/**
+	 * The Context is used for two things: copying content:// files into the
+	 * cache, and opening the player screen directly from native code (no
+	 * dependency on PPSSPP's per-frame command queue).
+	 */
 	public static void attachContext(Context context) {
-		sContext = context != null ? context.getApplicationContext() : null;
+		if (context == null) {
+			sContext = null;
+			return;
+		}
+		sContext = context.getApplicationContext();
+		// The application Context is enough: the Intent carries
+		// FLAG_ACTIVITY_NEW_TASK, so it can be started from any Context.
+		if (isAvailable()) nativeSetContext(sContext);
 	}
 
 	public static String buildId() { return isAvailable() ? nativeBuildId() : "unavailable"; }
@@ -313,6 +337,7 @@ public final class SphynxExtCore {
 
 	private static native void nativeSetPaths(String nativeLibraryDir, String systemDir, String saveDir);
 	private static native void nativeSetMemstick(String memstickDir);
+	private static native void nativeSetContext(Context context);
 	private static native int nativeEnsureBiosTree(String memstickDir);
 	private static native String nativeBiosRoot();
 	private static native String nativeBiosDir(String systemKey);

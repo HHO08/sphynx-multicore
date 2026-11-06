@@ -251,6 +251,13 @@ Java_org_sphynx_emulator_SphynxExtCore_nativeSetMemstick(JNIEnv *env, jclass, js
 	if (p) env->ReleaseStringUTFChars(jmemstick, p);
 }
 
+// The app Context, cached as a global reference so the player screen can be
+// started from native code (see jni/sphynx_launch_jni.cpp).
+extern "C" JNIEXPORT void JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeSetContext(JNIEnv *env, jclass, jobject context) {
+	sphynx_ui_set_context(env, context);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_sphynx_emulator_SphynxExtCore_nativeBiosRoot(JNIEnv *env, jclass) {
 	return ToJavaString(env, std::string(sphynx_ui_bios_root()));

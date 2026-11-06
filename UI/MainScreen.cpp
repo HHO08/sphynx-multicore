@@ -82,26 +82,59 @@ bool MainScreen::showHomebrewTab = false;
 // place that can start a game: LaunchFile(), GameScreen::OnPlay(), the
 // boot-from-intent paths in MiscScreens.cpp / NativeApp.cpp, and as a last
 // line of defence from EmuScreen::update().
+//
+// Every decision is written to PSP/sphynx_log.txt, so a device that still
+// misbehaves leaves a record of exactly which test failed instead of a
+// screenshot of an error message.
+static bool SphynxLaunchPlayer(const std::string &path, const char *reason) {
+	sphynx_ui_log_line((std::string("route: ") + reason + " -> " + path).c_str());
+#if PPSSPP_PLATFORM(ANDROID)
+	// Preferred: build and start the Intent from native code. It does not depend
+	// on PPSSPP's per-frame command queue being alive at this instant.
+	const int launched = sphynx_ui_launch_player(path.c_str());
+	if (launched == 1)
+		return true;
+	// Fallback: the queue drained by NativeActivity a few milliseconds later.
+	Sphynx_SendCommandToJava("sphynx_launch", path.c_str());
+	return true;
+#else
+	return false;
+#endif
+}
+
 bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {
-	// Local covers plain files and Android content:// URIs alike: a game
-	// picked through the Storage Access Framework is a CONTENT_URI, and a
-	// check for PathType::NATIVE silently skipped every one of those.
+	// Local covers plain files and Android content:// URIs alike: a game picked
+	// through the Storage Access Framework is a CONTENT_URI, and a check for
+	// PathType::NATIVE silently skipped every one of those.
 	if (!path.IsLocalType())
 		return false;
 	const std::string sphynxPath = path.ToString();
-	if (sphynx_ui_is_external(sphynxPath.c_str()) != 1)
+	const int external = sphynx_ui_is_external(sphynxPath.c_str());
+	if (external != 1) {
+		if (external == -1)
+			sphynx_ui_log_line(("route: not classified as a game -> " + sphynxPath).c_str());
 		return false;
-#if PPSSPP_PLATFORM(ANDROID)
-	// The player screen is Java-side: ask the app shell to open it.
-	Sphynx_SendCommandToJava("sphynx_launch", sphynxPath.c_str());
+	}
 	(void)screenManager;
-	return true;
-#else
-	// Desktop builds ship no player screen: let the caller do what it always
-	// did instead of swallowing the request.
-	(void)screenManager;
+	return SphynxLaunchPlayer(sphynxPath, "detected as an external system");
+}
+
+// SPHYNX: second chance, used when the PSP loader has already refused a file.
+//
+// If booting failed and the file cannot be a PSP disc by its extension, it
+// almost certainly belongs to another system and a detection detail was the
+// only thing standing in the way. Handing it to the player here means the user
+// never sees "Failed initializing CPU or memory" for a non-PSP game again.
+bool SphynxRouteBootFailure(const Path &path) {
+	if (!path.IsLocalType())
+		return false;
+	const std::string sphynxPath = path.ToString();
+	if (sphynx_ui_is_external(sphynxPath.c_str()) == 1)
+		return SphynxLaunchPlayer(sphynxPath, "PSP loader refused it, detected as external");
+	if (sphynx_ui_is_known_extension(sphynxPath.c_str()) == 1)
+		return SphynxLaunchPlayer(sphynxPath, "PSP loader refused it, known Sphynx extension");
+	sphynx_ui_log_line(("route: PSP loader refused an unknown file (left to PPSSPP) -> " + sphynxPath).c_str());
 	return false;
-#endif
 }
 
 bool LaunchFile(ScreenManager *screenManager, const Path &path) {

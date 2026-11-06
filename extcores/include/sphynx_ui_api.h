@@ -100,6 +100,28 @@ SPHYNX_UI_EXPORT char *sphynx_ui_bios_missing(const char *system_key);
 // "complete" / "missing x, y" / "no BIOS needed".
 SPHYNX_UI_EXPORT const char *sphynx_ui_bios_status(const char *system_key);
 
+// ---------------------------------------------------------------------------
+// Opening the player screen
+// ---------------------------------------------------------------------------
+// The Android app shell hands us its Context once at start-up. With it the
+// player can be opened straight from native code, without going through
+// PPSSPP's per-frame command queue — one less thing that can silently fail.
+SPHYNX_UI_EXPORT void sphynx_ui_set_context(void *jni_env, void *context);
+
+// 1 = the player screen was started, 0 = no Context yet (the caller then falls
+// back to the command queue), -1 = Java refused (see the log).
+SPHYNX_UI_EXPORT int sphynx_ui_launch_player(const char *path);
+
+// 1 when the file extension belongs to a system Sphynx handles (it reads the
+// same table the game-list filter uses, so the two can never disagree).
+SPHYNX_UI_EXPORT int sphynx_ui_is_known_extension(const char *path);
+
+// Flight recorder: PSP/sphynx_log.txt (see diag_log.h).
+SPHYNX_UI_EXPORT void sphynx_ui_set_log_path(const char *path);
+SPHYNX_UI_EXPORT const char *sphynx_ui_log_path(void);
+// One line into the same log, callable from PPSSPP's UI code.
+SPHYNX_UI_EXPORT void sphynx_ui_log_line(const char *text);
+
 #ifdef __cplusplus
 }
 #endif

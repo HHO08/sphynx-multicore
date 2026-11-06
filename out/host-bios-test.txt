@@ -1,5 +1,5 @@
 Sphynx BIOS/state test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
-workspace: /tmp/sphynx_bios_NlPjih
+workspace: /tmp/sphynx_bios_RmeqVC
 
 [BIOS registry]
   ok    exactly 16 systems have a BIOS folder
@@ -65,4 +65,20 @@ workspace: /tmp/sphynx_bios_NlPjih
   ok    hasState() reports the written slot as used
   ok    an empty snapshot is rejected
 
-54 checks, 0 failure(s) — all good
+[diagnostic log]
+  ok    the log path is remembered
+  ok    a line reaches the file
+  ok    formatted lines work
+  ok    lines carry a timestamp
+  ok    the log truncates itself instead of growing forever
+  ok    and stays usable after truncation
+
+[extension routing]
+  ok    .sfc is a Sphynx extension
+  ok    .gba is a Sphynx extension
+  ok    the check is case insensitive
+  ok    an unknown extension is not claimed
+  ok    a file without an extension is not claimed
+  ok    no Context on the host: launch reports 0
+
+66 checks, 0 failure(s) — all good

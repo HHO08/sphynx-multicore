@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.3
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.4
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -98,7 +98,8 @@ jobs:
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
-              extcores/src/state_file.cpp extcores/tests/host_ui_test.cpp -ldl
+              extcores/src/state_file.cpp extcores/src/diag_log.cpp \
+              extcores/tests/host_ui_test.cpp -ldl
           ./out/host_ui_test | tee out/host-ui-test.txt
 
           # Stage 5: the real play path, end to end on the host toolchain —
@@ -109,7 +110,8 @@ jobs:
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
-              extcores/src/state_file.cpp extcores/tests/host_play_test.cpp -ldl
+              extcores/src/state_file.cpp extcores/src/diag_log.cpp \
+              extcores/tests/host_play_test.cpp -ldl
           ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
 
           # Stage 6: PSP/SYSTEMS_BIOS (16 folders, READMEs, adoption of an
@@ -120,7 +122,8 @@ jobs:
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
-              extcores/src/state_file.cpp extcores/tests/host_bios_test.cpp -ldl
+              extcores/src/state_file.cpp extcores/src/diag_log.cpp \
+              extcores/tests/host_bios_test.cpp -ldl
           ./out/host_bios_test | tee out/host-bios-test.txt
 
           # The Android-only translation units never get compiled on a runner
@@ -131,8 +134,10 @@ jobs:
               -Iextcores/tests/android-stubs -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
               -Iextcores/include -Iextcores/src \
               extcores/src/player_android.cpp extcores/jni/sphynx_extcore_jni.cpp \
+              extcores/jni/sphynx_launch_jni.cpp \
               extcores/src/android_paths.cpp extcores/src/ui_api.cpp \
-              extcores/src/bios_layout.cpp extcores/src/state_file.cpp
+              extcores/src/bios_layout.cpp extcores/src/state_file.cpp \
+              extcores/src/diag_log.cpp
 
           # Stage 6: every game launch path must go through SphynxRouteExternal().
           # This is the static guard for the "Failed initializing CPU or memory"

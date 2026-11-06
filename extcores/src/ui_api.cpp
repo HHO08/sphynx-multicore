@@ -13,6 +13,7 @@
 #include "png_write.h"
 #include "android_paths.h"
 #include "bios_layout.h"
+#include "diag_log.h"
 
 #include <chrono>
 #include <mutex>
@@ -343,6 +344,8 @@ int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
 		g_last_error = "no memstick folder: the BIOS tree was not created";
 		return -1;
 	}
+	// The flight recorder lives next to the folders the user can find.
+	sphynx::SetLogPath(g_memstick_dir + "/sphynx_log.txt");
 	std::string report;
 	const int made = sphynx::EnsureBiosTree(g_memstick_dir, &report);
 	if (made < 0) {
@@ -355,6 +358,9 @@ int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
 	const int adopted = sphynx::AdoptLegacyBios(g_memstick_dir, &adopted_report);
 	g_last_error = "bios tree ready (" + std::to_string(made) + " new folders, " +
 	               std::to_string(adopted) + " files adopted)";
+	sphynx::Logf("bios tree: %s (%d new folders, %d adopted)", sphynx::BiosRoot(g_memstick_dir).c_str(),
+	             made, adopted);
+	if (!adopted_report.empty()) sphynx::LogLine("adopted from PSP/SYSTEM:" + adopted_report);
 	return made;
 }
 
@@ -385,6 +391,51 @@ char *sphynx_ui_bios_missing(const char *system_key) {
 	if (!out) return nullptr;
 	std::memcpy(out, missing.c_str(), missing.size() + 1);
 	return out;
+}
+
+// ---------------------------------------------------------------------------
+//  Launching the player + diagnostics
+// ---------------------------------------------------------------------------
+
+#if !defined(SPHYNX_ANDROID)
+// Desktop builds have no Activity to open: the real implementation lives in
+// extcores/jni/sphynx_launch_jni.cpp, which only exists in the Android build.
+void sphynx_ui_set_context(void *, void *) {}
+int sphynx_ui_launch_player(const char *) { return 0; }
+#endif
+
+void sphynx_ui_set_log_path(const char *path) { sphynx::SetLogPath(path ? path : ""); }
+
+void sphynx_ui_log_line(const char *text) { sphynx::LogLine(text ? text : ""); }
+
+const char *sphynx_ui_log_path(void) {
+	static std::string path;
+	path = sphynx::LogPath();
+	return path.c_str();
+}
+
+int sphynx_ui_is_known_extension(const char *path) {
+	if (!path || !*path) return 0;
+	std::string name = sphynx::DisplayNameOf(path);
+	const size_t dot = name.find_last_of('.');
+	// A dot in a folder name is not an extension: compare against the file name
+	// only, which DisplayNameOf already isolated.
+	if (dot == std::string::npos) return 0;
+	std::string ext = name.substr(dot + 1);
+	for (char &c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
+	if (ext.empty()) return 0;
+	// Same token list the game list uses, so "is this a Sphynx extension?" can
+	// never disagree with what the list shows.
+	const std::string filter = sphynx_ui_extension_filter();
+	size_t pos = 0;
+	while (pos <= filter.size()) {
+		const size_t sep = filter.find(':', pos);
+		const std::string token = filter.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
+		if (!token.empty() && token == ext) return 1;
+		if (sep == std::string::npos) break;
+		pos = sep + 1;
+	}
+	return 0;
 }
 
 const char *sphynx_ui_bios_status(const char *system_key) {
