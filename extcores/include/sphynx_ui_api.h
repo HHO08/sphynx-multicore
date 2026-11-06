@@ -24,6 +24,12 @@ extern "C" {
 
 // Paths the UI layer needs in order to find bundled cores and store saves.
 // Called once from Java at startup (nativeLibraryDir + app data dirs).
+// Same as sphynx_ui_set_paths, but also records the process JavaVM so native
+// worker threads (thumbnail generation) can call back into Java.
+SPHYNX_UI_EXPORT void sphynx_ui_set_paths_and_vm(const char *native_library_dir,
+                                                 const char *system_dir,
+                                                 const char *save_dir, void *jni_env);
+
 SPHYNX_UI_EXPORT void sphynx_ui_set_paths(const char *native_library_dir, const char *system_dir,
                          const char *save_dir);
 
@@ -51,6 +57,11 @@ void Sphynx_SendCommandToJava(const char *command, const char *param);
 // "key|Display name;key|Display name;..." — systems that could claim this file.
 // Used when an extension is shared by several systems (.cue/.chd/.iso).
 SPHYNX_UI_EXPORT const char *sphynx_ui_candidates(const char *path);
+
+// Resolves an Android content:// URI (or a plain path) to a file the emulator
+// cores can fopen(). Returns a malloc'd string; free with sphynx_ui_free().
+// NULL when the file cannot be reached at all.
+SPHYNX_UI_EXPORT char *sphynx_ui_local_path(const char *path);
 
 // Human readable reason for the last failure (never null).
 SPHYNX_UI_EXPORT const char *sphynx_ui_last_error(void);

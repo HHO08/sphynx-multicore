@@ -22,6 +22,7 @@
 // RetroPad button ids + device constants for the on-screen pad. The core ABI
 // header is vendored in extcores/include so we never depend on the core source.
 #include "libretro.h"
+#include "android_paths.h"
 
 #ifdef SPHYNX_ANDROID
 
@@ -32,6 +33,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -42,7 +44,12 @@
 namespace {
 
 // --- state -----------------------------------------------------------------
-sphynx::Session *g_session = nullptr;
+// The session is owned through a shared_ptr so the render thread can keep
+// running a frame while the UI thread asks for a stop: the object is destroyed
+// only when the last frame finishes. A raw pointer here was a use-after-free
+// waiting to happen (back button pressed mid-frame).
+std::mutex g_session_mutex;
+std::shared_ptr<sphynx::Session> g_session;
 std::string g_error;
 
 struct CaptureSink : sphynx::FrameSink {
@@ -273,20 +280,29 @@ JNIEXPORT jstring JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeStart(JNIEnv *env, jclass, jstring jcore,
                                                   jstring jcontent, jstring jsys, jstring jsave) {
 	const std::string core = JStr(env, jcore);
-	const std::string content = JStr(env, jcontent);
+	const std::string requested = JStr(env, jcontent);
 	const std::string sysdir = JStr(env, jsys);
 	const std::string savedir = JStr(env, jsave);
 
-	if (g_session) {
-		g_session->Stop();
-		delete g_session;
-		g_session = nullptr;
+	// Accept a content:// URI here as well: cores can only fopen() real files.
+	// Java resolves before calling us, this is the belt-and-braces second path.
+	std::string content = sphynx::LocalPathFor(requested);
+	if (content.empty()) {
+		g_error = "cannot read the game file (permission or unsupported storage)";
+		PERR("%s: %s", g_error.c_str(), requested.c_str());
+		return env->NewStringUTF(g_error.c_str());
 	}
-	g_session = new sphynx::Session();
-	g_session->SetFrameSink(&g_capture);
-	g_session->SetAudioSink(&g_audio);
-	g_session->SetWatchdogMs(5000);
-	g_session->SetInputSource([](unsigned port, unsigned device, unsigned, unsigned id) -> int16_t {
+
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		g_session.reset();   // destroys the previous session once its frame ends
+	}
+
+	auto session = std::make_shared<sphynx::Session>();
+	session->SetFrameSink(&g_capture);
+	session->SetAudioSink(&g_audio);
+	session->SetWatchdogMs(5000);
+	session->SetInputSource([](unsigned port, unsigned device, unsigned, unsigned id) -> int16_t {
 		if (port != 0 || device != RETRO_DEVICE_JOYPAD) return 0;
 		if (id >= 16) return 0;
 		std::lock_guard<std::mutex> lock(g_input_mutex);
@@ -294,45 +310,56 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeStart(JNIEnv *env, jclass, jstring j
 	});
 
 	std::string err;
-	if (!g_session->Start(core, content, sysdir, savedir, &err)) {
-		PERR("start failed: %s", err.c_str());
+	if (!session->Start(core, content, sysdir, savedir, &err)) {
+		PERR("start failed: %s (core=%s content=%s)", err.c_str(), core.c_str(), content.c_str());
 		g_error = err;
-		delete g_session;
-		g_session = nullptr;
 		return env->NewStringUTF(err.c_str());
 	}
 
-	const int rate = int(g_session->SampleRate());
+	const int rate = int(session->SampleRate());
 	{
 		std::lock_guard<std::mutex> lock(g_audio_mutex);
-		g_audio_ring.assign(size_t(rate) * 2, 0);   // ~1 second stereo
+		g_audio_ring.assign(size_t(rate > 8000 ? rate : 44100) * 2, 0);   // ~1 s stereo
 		g_audio_read = g_audio_write = g_audio_count = 0;
 	}
-	PLOG("session started, %.0f Hz", g_session->SampleRate());
+	g_capture.frames = 0;
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		g_session = session;
+	}
+	PLOG("session started: core=%s content=%s %.0f Hz", core.c_str(), content.c_str(),
+	     session->SampleRate());
 	return nullptr;
 }
 
 JNIEXPORT jint JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeFrame(JNIEnv *, jclass, jint w, jint h) {
-	if (!g_session) return -1;
-	const bool ok = g_session->RunFrame();
+	std::shared_ptr<sphynx::Session> session;
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		session = g_session;   // keeps the session alive for the whole frame
+	}
+	if (!session) return -1;
+	const bool ok = session->RunFrame();
 	RenderFrame(int(w), int(h));
 	return ok ? 0 : 1;
 }
 
 JNIEXPORT void JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeStop(JNIEnv *, jclass) {
-	if (g_session) {
-		g_session->Stop();
-		delete g_session;
-		g_session = nullptr;
+	std::shared_ptr<sphynx::Session> doomed;
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		doomed.swap(g_session);
 	}
+	if (doomed) doomed->Stop();   // safe: the frame in flight holds a reference
 	g_capture.pixels.clear();
 	g_capture.fresh = false;
 }
 
 JNIEXPORT jint JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeSampleRate(JNIEnv *, jclass) {
+	std::lock_guard<std::mutex> lock(g_session_mutex);
 	return g_session ? int(g_session->SampleRate()) : 44100;
 }
 
@@ -376,11 +403,16 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeReleaseAll(JNIEnv *, jclass) {
 
 JNIEXPORT jstring JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeStatus(JNIEnv *env, jclass) {
-	if (!g_session) return env->NewStringUTF(g_error.c_str());
+	std::shared_ptr<sphynx::Session> session;
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		session = g_session;
+	}
+	if (!session) return env->NewStringUTF(g_error.c_str());
 	char buf[256];
-	snprintf(buf, sizeof(buf), "frame %.2f ms | worst %.2f ms | frames %llu",
-	         g_session->Stats().last_frame_ms, g_session->Stats().worst_frame_ms,
-	         (unsigned long long)g_session->Stats().frames);
+	snprintf(buf, sizeof(buf), "%.1f ms/frame (worst %.1f) | %llu frames",
+	         session->Stats().last_frame_ms, session->Stats().worst_frame_ms,
+	         (unsigned long long)session->Stats().frames);
 	return env->NewStringUTF(buf);
 }
 

@@ -587,6 +587,12 @@ public abstract class NativeActivity extends Activity {
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
+		// SPHYNX: where the bundled cores live, where BIOS/saves belong, and
+		// a context so a content:// game file can be copied for the cores.
+		org.sphynx.emulator.SphynxExtCore.attachContext(getApplicationContext());
+		org.sphynx.emulator.SphynxExtCore.setPaths(getApplicationInfo().nativeLibraryDir,
+				org.sphynx.emulator.SphynxExtCore.systemDir(this),
+				org.sphynx.emulator.SphynxExtCore.saveDir(this));
 		sizeManager = new SizeManager(this);
 		TextRenderer.init(this);
 		shuttingDown = false;

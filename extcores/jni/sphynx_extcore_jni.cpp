@@ -14,6 +14,7 @@
 // ============================================================================
 #include "sphynx_extcore.h"
 #include "sphynx_ui_api.h"
+#include "../src/android_paths.h"
 
 #include <sys/stat.h>
 
@@ -54,7 +55,7 @@ jstring ToJavaString(JNIEnv *env, const std::string &s) {
 // where BIOS/save files belong.
 extern "C" JNIEXPORT void JNICALL
 Java_org_sphynx_emulator_SphynxExtCore_nativeSetPaths(JNIEnv *env, jclass, jstring jlibdir,
-                                                     jstring jdatadir) {
+                                                     jstring jsysdir, jstring jsavedir) {
 	auto str = [&](jstring s) -> std::string {
 		if (!s) return std::string();
 		const char *c = env->GetStringUTFChars(s, nullptr);
@@ -63,12 +64,15 @@ Java_org_sphynx_emulator_SphynxExtCore_nativeSetPaths(JNIEnv *env, jclass, jstri
 		return out;
 	};
 	const std::string lib = str(jlibdir);
-	const std::string data = str(jdatadir);
-	const std::string sys = data + "/sphynx/system";
-	const std::string save = data + "/sphynx/save";
+	// The directories are chosen in Java: the BIOS folder is PPSSPP's own
+	// PSP/SYSTEM when it exists, so a user's existing BIOS files are found.
+	const std::string sys = str(jsysdir);
+	const std::string save = str(jsavedir);
 	::mkdir(sys.c_str(), 0777);
 	::mkdir(save.c_str(), 0777);
-	sphynx_ui_set_paths(lib.c_str(), sys.c_str(), save.c_str());
+	// env is passed so the host can call back into Java from its worker threads
+	// (a content:// game file is copied into the app cache on demand).
+	sphynx_ui_set_paths_and_vm(lib.c_str(), sys.c_str(), save.c_str(), env);
 	SXLOG("paths: lib=%s sys=%s save=%s", lib.c_str(), sys.c_str(), save.c_str());
 }
 
@@ -78,6 +82,27 @@ Java_org_sphynx_emulator_SphynxExtCore_nativeCandidates(JNIEnv *env, jclass, jst
 	std::string out = sphynx_ui_candidates(p ? p : "");
 	if (p) env->ReleaseStringUTFChars(jpath, p);
 	return ToJavaString(env, out);
+}
+
+// The BIOS note for a system ("scph5501.bin", …) or "" when none is needed.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBiosHint(JNIEnv *env, jclass, jstring jkey) {
+	const char *k = jkey ? env->GetStringUTFChars(jkey, nullptr) : nullptr;
+	const sphynx::SystemInfo *info = sphynx::FindSystemByKey(k ? k : "");
+	if (k) env->ReleaseStringUTFChars(jkey, k);
+	return ToJavaString(env, info && info->bios_hint ? info->bios_hint : "");
+}
+
+// Turns a content:// URI (or any path) into a file the cores can open.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeResolvePath(JNIEnv *env, jclass, jstring jpath) {
+	const char *p = jpath ? env->GetStringUTFChars(jpath, nullptr) : nullptr;
+	char *local = sphynx_ui_local_path(p ? p : "");
+	if (p) env->ReleaseStringUTFChars(jpath, p);
+	if (!local) return ToJavaString(env, std::string());
+	jstring out = ToJavaString(env, std::string(local));
+	sphynx_ui_free(local);
+	return out;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

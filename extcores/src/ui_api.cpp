@@ -11,6 +11,10 @@
 #include "libretro.h"   // RetroPad button ids for the synthetic START press
 #include "sphynx_ui_api.h"
 #include "png_write.h"
+#include "android_paths.h"
+
+#include <chrono>
+#include <mutex>
 
 #include <cstdio>
 #include <cstdlib>
@@ -129,9 +133,12 @@ bool ReadHead(const std::string &path, std::vector<uint8_t> *out, size_t want = 
 }
 
 bool IsArchiveExt(const std::string &path) {
-	const size_t dot = path.find_last_of('.');
+	// Look at the file NAME, so content:// URIs (whose path is percent-encoded
+	// and may carry query junk) are classified the same way as plain paths.
+	const std::string name = sphynx::DisplayNameOf(path);
+	const size_t dot = name.find_last_of('.');
 	if (dot == std::string::npos) return false;
-	std::string ext = path.substr(dot + 1);
+	std::string ext = name.substr(dot + 1);
 	for (char &c : ext) c = char(tolower((unsigned char)c));
 	// Archives keep PPSSPP's own behaviour (install prompt); they are never
 	// routed to an arcade/DOS core by guessing from the container.
@@ -160,13 +167,29 @@ void sphynx_ui_set_paths(const char *native_library_dir, const char *system_dir,
 	g_save_dir = save_dir ? save_dir : "";
 }
 
+// Same, but also records the process JavaVM: the thumbnail generator runs on a
+// PPSSPP worker thread and still has to ask Java for a content:// copy.
+void sphynx_ui_set_paths_and_vm(const char *native_library_dir, const char *system_dir,
+                                const char *save_dir, void *jni_env) {
+	sphynx_ui_set_paths(native_library_dir, system_dir, save_dir);
+	sphynx::CaptureJavaVM(jni_env);
+}
+
 int sphynx_ui_is_external(const char *path) {
 	if (!path || !*path) return -1;
 	if (IsArchiveExt(path)) return -1;   // let PPSSPP handle archives itself
+
+	// Android hands us content:// URIs for anything opened through the Storage
+	// Access Framework. Detection must see the real bytes, so resolve first;
+	// when nothing can be resolved we still answer from the extension alone
+	// (an unreadable file keeps its row in the list instead of vanishing).
+	// No copying here: the list asks this for every file it shows.
+	const std::string local = sphynx::LocalPathFor(path, /*allow_copy=*/false);
+	const std::string &probe = local.empty() ? std::string(path) : local;
 	std::vector<uint8_t> head;
-	const bool have_head = ReadHead(path, &head);
+	const bool have_head = ReadHead(probe, &head);
 	const sphynx::DetectResult r =
-		sphynx::Detect(path, have_head && !head.empty() ? head.data() : nullptr, head.size());
+		sphynx::Detect(probe, have_head && !head.empty() ? head.data() : nullptr, head.size());
 	if (r.is_psp_native) return 0;                      // PSP -> PPSSPP itself
 	if (r.candidates.empty()) return -1;
 	return 1;
@@ -177,7 +200,18 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	*out = nullptr;
 	*len = 0;
 
-	const char *key = SystemKeyFor(path);
+	// One core at a time: libretro's environment callback has a single active
+	// instance per process, so two thumbnail jobs must never overlap.
+	static std::mutex job_mutex;
+	std::lock_guard<std::mutex> job_lock(job_mutex);
+
+	const std::string local = sphynx::LocalPathFor(path);
+	if (local.empty()) {
+		g_last_error = "file is not readable (cannot resolve the Android URI)";
+		return 0;
+	}
+
+	const char *key = SystemKeyFor(local);
 	if (!key) {
 		g_last_error = "no external system for this file";
 		return 0;
@@ -199,7 +233,7 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	});
 
 	std::string err;
-	if (!session.Start(core, path, g_system_dir, g_save_dir, &err)) {
+	if (!session.Start(core, local, g_system_dir, g_save_dir, &err)) {
 		g_last_error = "core start failed: " + err;
 		return 0;
 	}
@@ -209,7 +243,11 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	int best_frames = 0;
 	std::vector<uint8_t> best;
 	int best_score = -1;
+	// Hard wall-clock budget: a slow core must never stall the game list for
+	// long. 6 s is enough for a title screen on every supported system.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
 	for (int i = 0; i < 240; ++i) {
+		if (std::chrono::steady_clock::now() > deadline) break;
 		if (!session.RunFrame()) break;
 		if (grabber.frames == 0) continue;
 		if (i < 30) continue;   // let it settle
@@ -252,15 +290,27 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 
 void sphynx_ui_free(void *p) { std::free(p); }
 
+char *sphynx_ui_local_path(const char *path) {
+	if (!path || !*path) return nullptr;
+	const std::string local = sphynx::LocalPathFor(path);
+	if (local.empty()) return nullptr;
+	char *out = static_cast<char *>(std::malloc(local.size() + 1));
+	if (!out) return nullptr;
+	std::memcpy(out, local.c_str(), local.size() + 1);
+	return out;
+}
+
 // "key|Display name;key|Display name;..." for the ambiguous-disc chooser.
 const char *sphynx_ui_candidates(const char *path) {
 	static std::string out;
 	out.clear();
 	if (!path || !*path) return out.c_str();
+	const std::string local = sphynx::LocalPathFor(path);
+	const std::string &probe = local.empty() ? std::string(path) : local;
 	std::vector<uint8_t> head;
-	const bool have = ReadHead(path, &head);
+	const bool have = ReadHead(probe, &head);
 	const sphynx::DetectResult r =
-		sphynx::Detect(path, have && !head.empty() ? head.data() : nullptr, head.size());
+		sphynx::Detect(probe, have && !head.empty() ? head.data() : nullptr, head.size());
 	bool first = true;
 	for (const auto &c : r.candidates) {
 		const sphynx::SystemInfo *info = sphynx::FindSystem(c.id);

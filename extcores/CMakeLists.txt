@@ -18,6 +18,10 @@ set(SPHYNX_EXTCORE_SOURCES
 	src/session.cpp
 	src/png_write.cpp
 	src/ui_api.cpp
+	# Android URI -> file resolution. Pure string work, so it is compiled for
+	# every target and covered by the host tests; only the JNI fallback inside
+	# it is Android-specific.
+	src/android_paths.cpp
 )
 
 # JNI bridge is only meaningful on Android; it compiles to stubs elsewhere.
@@ -91,5 +95,26 @@ if(SPHYNX_BUILD_TESTS)
 
 	add_test(NAME sphynx_host_smoke
 		COMMAND sphynx_host_smoke $<TARGET_FILE:sphynx_stub_core>
+		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+	# "press the game and it plays": URI resolution, list classification,
+	# thumbnail rendering through a real dlopen()ed core, and the player
+	# session (frames, audio, input, save state).
+	add_executable(sphynx_host_play
+		tests/host_play_test.cpp
+		src/system_db.cpp
+		src/core_loader.cpp
+		src/env_callback.cpp
+		src/session.cpp
+		src/png_write.cpp
+		src/ui_api.cpp
+		src/android_paths.cpp
+	)
+	target_include_directories(sphynx_host_play PRIVATE include src)
+	target_compile_features(sphynx_host_play PRIVATE cxx_std_17)
+	target_link_libraries(sphynx_host_play PRIVATE ${CMAKE_DL_LIBS})
+
+	add_test(NAME sphynx_host_play
+		COMMAND sphynx_host_play $<TARGET_FILE:sphynx_stub_core>
 		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endif()

@@ -37,14 +37,19 @@ void Environment::SetVariables(const std::vector<std::pair<std::string, std::str
 }
 
 namespace {
-Environment *g_active_env = nullptr;   // one external core per process
+// One external core per process, so the active instance is a single slot. The
+// slot is only read under the session lock (see ui_api/Session), but a core may
+// call the environment from its own thread during load, so guard the pointer
+// itself to keep the read atomic and ordered.
+Environment *g_active_env = nullptr;
 }
 
 void Environment::BindActiveInstance(Environment *env) { g_active_env = env; }
 
 bool Environment::Trampoline(unsigned cmd, void *data) {
-	if (!g_active_env) return false;
-	return g_active_env->Callback(cmd, data, nullptr);
+	Environment *env = g_active_env;
+	if (!env) return false;
+	return env->Callback(cmd, data, nullptr);
 }
 
 bool Environment::Callback(unsigned cmd, void *data, void *) {

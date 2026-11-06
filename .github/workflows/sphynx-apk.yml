@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.1
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.2
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -99,6 +99,16 @@ jobs:
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/tests/host_ui_test.cpp -ldl
           ./out/host_ui_test | tee out/host-ui-test.txt
+
+          # Stage 5: the real play path, end to end on the host toolchain —
+          # content:// URI resolution, thumbnail through a dlopen()ed core,
+          # player session (frames/audio/input/save state).
+          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
+              -o out/host_play_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
+              extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/png_write.cpp extcores/src/ui_api.cpp \
+              extcores/src/android_paths.cpp extcores/tests/host_play_test.cpp -ldl
+          ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
 
       - name: Write signing config outside the repository
         env:

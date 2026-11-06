@@ -35,12 +35,16 @@ thread_local Session *tls_session = nullptr;
 thread_local FrameSink *tls_frame = nullptr;
 thread_local AudioSink *tls_audio = nullptr;
 thread_local Session::InputSource *tls_input = nullptr;
+thread_local const Environment *tls_env = nullptr;
 
 void CbVideo(const void *data, unsigned width, unsigned height, size_t pitch) {
 	if (!tls_frame) return;
 	if (!data) return;   // core asking us to duplicate the previous frame
-	// The pixel format was fixed by Environment at load time.
-	tls_frame->OnFrame(data, width, height, pitch, PixelFormat::RGB565);
+	// The format is whatever the core negotiated through SET_PIXEL_FORMAT.
+	// Assuming RGB565 here made every core that runs in XRGB8888 (Flycast,
+	// bsnes, MelonDS...) draw garbage, so ask the environment instead.
+	const PixelFormat fmt = tls_env ? tls_env->GetPixelFormat() : PixelFormat::RGB565;
+	tls_frame->OnFrame(data, width, height, pitch, fmt);
 }
 
 void CbAudioSample(int16_t left, int16_t right) {
@@ -97,6 +101,7 @@ bool Session::Start(const std::string &core_path, const std::string &content_pat
 	tls_frame = frame_sink_;
 	tls_audio = audio_sink_;
 	tls_input = &input_;
+	tls_env = &env_;
 
 	loader_.sym->set_video_refresh(&CbVideo);
 	loader_.sym->set_audio_sample(&CbAudioSample);
@@ -171,6 +176,7 @@ void Session::Stop() {
 	tls_frame = nullptr;
 	tls_audio = nullptr;
 	tls_input = nullptr;
+	tls_env = nullptr;
 }
 
 size_t Session::StateSize() const {
