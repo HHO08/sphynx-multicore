@@ -78,7 +78,9 @@ bool MainScreen::showHomebrewTab = false;
 bool LaunchFile(ScreenManager *screenManager, const Path &path) {
 	// SPHYNX: hand non-PSP content to the Sphynx player screen. PSP files fall
 	// straight through to the original code below, unchanged.
-	if (path.Type() == PathType::NATIVE) {
+	// On Android a game picked through the Storage Access Framework arrives as
+	// a CONTENT_URI, not a NATIVE path: both are local, both must route.
+	if (path.IsLocalType()) {
 		const std::string nativePath = path.ToString();
 		if (sphynx_ui_is_external(nativePath.c_str()) == 1) {
 #if PPSSPP_PLATFORM(ANDROID)
