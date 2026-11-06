@@ -37,9 +37,16 @@ SPHYNX_UI_EXPORT int sphynx_ui_is_external(const char *path);
 SPHYNX_UI_EXPORT int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len);
 SPHYNX_UI_EXPORT void sphynx_ui_free(void *p);
 
-// Opens the Sphynx player screen for this file (Android). Returns 1 if the
-// request was handed to the Java layer, 0 when running headless (tests).
-SPHYNX_UI_EXPORT int sphynx_ui_launch(const char *path);
+// Opens the Sphynx player screen for this file.
+//
+// Implemented by the Android app shell (android/jni/app-android.cpp), which owns
+// the command queue Java drains every frame. It is declared here — not defined
+// in the host library — because the shell links *against* the host library, so
+// the host library must never reference the shell.
+#ifdef __cplusplus
+extern "C"
+#endif
+void Sphynx_SendCommandToJava(const char *command, const char *param);
 
 // "key|Display name;key|Display name;..." — systems that could claim this file.
 // Used when an extension is shared by several systems (.cue/.chd/.iso).

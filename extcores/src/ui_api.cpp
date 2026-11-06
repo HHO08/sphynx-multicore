@@ -250,22 +250,6 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	return 1;
 }
 
-#ifdef SPHYNX_ANDROID
-// Provided by android/jni/app-android.cpp (the app shell): pushes a command into
-// the queue Java drains every frame. One tiny hook instead of a second JNI path.
-extern "C" void Sphynx_SendCommandToJava(const char *command, const char *param);
-#endif
-
-int sphynx_ui_launch(const char *path) {
-	if (!path || !*path) return 0;
-#ifdef SPHYNX_ANDROID
-	Sphynx_SendCommandToJava("sphynx_launch", path);
-	return 1;
-#else
-	return 0;   // host tests / desktop: nothing to open
-#endif
-}
-
 void sphynx_ui_free(void *p) { std::free(p); }
 
 // "key|Display name;key|Display name;..." for the ambiguous-disc chooser.
