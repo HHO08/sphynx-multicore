@@ -388,15 +388,15 @@ static void EmuThreadJoin() {
 	INFO_LOG(Log::System, "EmuThreadJoin - joined");
 }
 
-// SPHYNX: the game list needs to ask Java to open the player screen. This is
-// the one-line bridge to the command queue that already exists below.
-extern "C" void Sphynx_SendCommandToJava(const char *command, const char *param) {
-	PushCommand(command ? command : "", param ? param : "");
-}
-
 static void PushCommand(std::string cmd, std::string param) {
 	std::lock_guard<std::mutex> guard(frameCommandLock);
 	frameCommands.push(FrameCommand(std::move(cmd), std::move(param)));
+}
+
+// SPHYNX: the game list needs to ask Java to open the player screen. This is
+// the one-line bridge into the command queue that Java already drains.
+extern "C" void Sphynx_SendCommandToJava(const char *command, const char *param) {
+	PushCommand(command ? command : "", param ? param : "");
 }
 
 // Android implementation of callbacks to the Java part of the app
