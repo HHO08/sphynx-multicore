@@ -19,6 +19,9 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
 #include "sphynx_extcore.h"
+// RetroPad button ids + device constants for the on-screen pad. The core ABI
+// header is vendored in extcores/include so we never depend on the core source.
+#include "libretro.h"
 
 #ifdef SPHYNX_ANDROID
 
