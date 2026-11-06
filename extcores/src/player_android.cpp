@@ -55,6 +55,7 @@ std::string g_error;
 struct CaptureSink : sphynx::FrameSink {
 	std::vector<uint8_t> pixels;   // converted to RGBA8888, ready for GL
 	unsigned w = 0, h = 0;
+	int frames = 0;                // diagnostics: frames received since start
 	bool fresh = false;
 
 	void OnGeometry(unsigned, unsigned, float) override {}
@@ -98,6 +99,7 @@ struct CaptureSink : sphynx::FrameSink {
 			}
 		}
 		fresh = true;
+		++frames;
 	}
 };
 

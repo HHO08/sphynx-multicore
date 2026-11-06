@@ -215,8 +215,20 @@ bool CopyContentUriToCache(const std::string &uri, std::string *out) {
 
 	JNIEnv *env = nullptr;
 	bool attached = false;
-	if (g_vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
+	// The two JNI flavours disagree on AttachCurrentThread's first parameter
+	// (JNIEnv** on Android, void** on the desktop JDK). Writing it through a
+	// void* keeps one source honest for both.
+	void *penv = nullptr;
+	if (g_vm->GetEnv(&penv, JNI_VERSION_1_6) == JNI_OK) {
+		env = static_cast<JNIEnv *>(penv);
+	} else {
+#if defined(__ANDROID__)
 		if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return false;
+#else
+		void *attached_env = nullptr;
+		if (g_vm->AttachCurrentThread(&attached_env, nullptr) != JNI_OK) return false;
+		env = static_cast<JNIEnv *>(attached_env);
+#endif
 		attached = true;
 	}
 

@@ -110,6 +110,16 @@ jobs:
               extcores/src/android_paths.cpp extcores/tests/host_play_test.cpp -ldl
           ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
 
+          # The Android-only translation units never get compiled on a runner
+          # without the NDK; type-check them against the stub headers so a typo
+          # fails here (in seconds) instead of after the APK build (in minutes).
+          JAVA_HOME="${JAVA_HOME:-$(dirname $(dirname $(readlink -f $(which javac))))}"
+          g++ -std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter -DSPHYNX_ANDROID=1 \
+              -Iextcores/tests/android-stubs -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+              -Iextcores/include \
+              extcores/src/player_android.cpp extcores/jni/sphynx_extcore_jni.cpp \
+              extcores/src/android_paths.cpp extcores/src/ui_api.cpp
+
       - name: Write signing config outside the repository
         env:
           KEYSTORE_B64: ${{ secrets.SPHYNX_KEYSTORE_BASE64 }}
