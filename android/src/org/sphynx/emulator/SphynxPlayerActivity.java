@@ -27,6 +27,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewGroup.LayoutParams;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -80,7 +81,7 @@ public class SphynxPlayerActivity extends Activity {
 				askSystem(choices, path);
 				return;
 			}
-			Toast.makeText(this, getString(org.sphynx.emulator.R.string.sphynxUnknownContent),
+			Toast.makeText(this, getString(org.ppsspp.ppsspp.R.string.sphynxUnknownContent),
 					Toast.LENGTH_LONG).show();
 			finish();
 			return;
@@ -88,7 +89,7 @@ public class SphynxPlayerActivity extends Activity {
 		String nativeDir = getApplicationInfo().nativeLibraryDir;
 		String corePath = SphynxExtCore.corePath(systemKey, nativeDir);
 		if (corePath == null || corePath.isEmpty()) {
-			Toast.makeText(this, getString(org.sphynx.emulator.R.string.sphynxCoreMissing),
+			Toast.makeText(this, getString(org.ppsspp.ppsspp.R.string.sphynxCoreMissing),
 					Toast.LENGTH_LONG).show();
 			finish();
 			return;
@@ -108,7 +109,7 @@ public class SphynxPlayerActivity extends Activity {
 				saveDir.getAbsolutePath());
 		if (err != null && !err.isEmpty()) {
 			Log.e(TAG, "start failed: " + err);
-			Toast.makeText(this, getString(org.sphynx.emulator.R.string.sphynxStartFailed) + " " + err,
+			Toast.makeText(this, getString(org.ppsspp.ppsspp.R.string.sphynxStartFailed) + " " + err,
 					Toast.LENGTH_LONG).show();
 			finish();
 			return;
@@ -155,7 +156,7 @@ public class SphynxPlayerActivity extends Activity {
 			labels[i] = bar >= 0 ? choices[i].substring(bar + 1) : choices[i];
 		}
 		new android.app.AlertDialog.Builder(this)
-				.setTitle(getString(org.sphynx.emulator.R.string.sphynxChooseSystem))
+				.setTitle(getString(org.ppsspp.ppsspp.R.string.sphynxChooseSystem))
 				.setItems(labels, (dialog, which) -> {
 					String key = choices[which];
 					int bar = key.indexOf('|');
@@ -169,7 +170,7 @@ public class SphynxPlayerActivity extends Activity {
 	private void startWithSystem(String path, String systemKey) {
 		String corePath = SphynxExtCore.corePath(systemKey, getApplicationInfo().nativeLibraryDir);
 		if (corePath == null || corePath.isEmpty()) {
-			Toast.makeText(this, getString(org.sphynx.emulator.R.string.sphynxCoreMissing),
+			Toast.makeText(this, getString(org.ppsspp.ppsspp.R.string.sphynxCoreMissing),
 					Toast.LENGTH_LONG).show();
 			finish();
 			return;
@@ -294,7 +295,7 @@ public class SphynxPlayerActivity extends Activity {
 				running.set(false);
 				runOnUiThread(() -> {
 					Toast.makeText(SphynxPlayerActivity.this,
-							getString(org.sphynx.emulator.R.string.sphynxCoreStopped),
+							getString(org.ppsspp.ppsspp.R.string.sphynxCoreStopped),
 							Toast.LENGTH_LONG).show();
 					finish();
 				});
