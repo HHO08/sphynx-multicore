@@ -3050,4 +3050,10 @@ endif()
 option(SPHYNX_EXTCORE "Build the Sphynx external-core host (multi-system support)" ON)
 if(SPHYNX_EXTCORE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extcores/CMakeLists.txt")
 	add_subdirectory(extcores)
+	# SPHYNX: link the external-core host into the JNI library so the UI layer
+	# (game list, thumbnail cache) can call into it without a second JNI hop.
+	# The PSP emulator itself never calls these symbols.
+	if(TARGET sphynx_extcore AND TARGET ${CoreLibName})
+		target_link_libraries(${CoreLibName} PRIVATE sphynx_extcore)
+	endif()
 endif()

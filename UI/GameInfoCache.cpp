@@ -40,6 +40,8 @@
 #include "Core/Loaders.h"
 #include "Core/Util/GameManager.h"
 #include "Core/Config.h"
+// SPHYNX: thumbnail bridge.
+#include "sphynx_ui_api.h"
 #include "UI/GameInfoCache.h"
 
 GameInfoCache *g_gameInfoCache;
@@ -807,7 +809,24 @@ handleELF:
 
 			case IdentifiedFileType::NORMAL_DIRECTORY:
 			default:
+			{
+				// SPHYNX: a non-PSP game gets a real thumbnail rendered from the
+				// game itself by its own emulator core, then cached exactly like a
+				// PSP ICON0.PNG would be.
+				if (flags_ & GameInfoFlags::ICON) {
+					const std::string nativePath = gamePath_.ToString();
+					unsigned char *png = nullptr;
+					int pngLen = 0;
+					if (sphynx_ui_is_external(nativePath.c_str()) == 1 &&
+					    sphynx_ui_make_thumbnail(nativePath.c_str(), &png, &pngLen) && png && pngLen > 0) {
+						std::lock_guard<std::mutex> lock(info_->lock);
+						info_->icon.data.assign(reinterpret_cast<const char *>(png), size_t(pngLen));
+						info_->icon.dataLoaded = true;
+						sphynx_ui_free(png);
+					}
+				}
 				break;
+			}
 		}
 
 		if (flags_ & GameInfoFlags::PARAM_SFO) {

@@ -13,6 +13,9 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
 #include "sphynx_extcore.h"
+#include "sphynx_ui_api.h"
+
+#include <sys/stat.h>
 
 #include <cstring>
 #include <string>
@@ -46,6 +49,36 @@ jstring ToJavaString(JNIEnv *env, const std::string &s) {
 }  // namespace
 
 #ifdef SPHYNX_ANDROID
+
+// Called once at app start: tells the host where the bundled cores live and
+// where BIOS/save files belong.
+extern "C" JNIEXPORT void JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeSetPaths(JNIEnv *env, jclass, jstring jlibdir,
+                                                     jstring jdatadir) {
+	auto str = [&](jstring s) -> std::string {
+		if (!s) return std::string();
+		const char *c = env->GetStringUTFChars(s, nullptr);
+		std::string out = c ? c : "";
+		env->ReleaseStringUTFChars(s, c);
+		return out;
+	};
+	const std::string lib = str(jlibdir);
+	const std::string data = str(jdatadir);
+	const std::string sys = data + "/sphynx/system";
+	const std::string save = data + "/sphynx/save";
+	::mkdir(sys.c_str(), 0777);
+	::mkdir(save.c_str(), 0777);
+	sphynx_ui_set_paths(lib.c_str(), sys.c_str(), save.c_str());
+	SXLOG("paths: lib=%s sys=%s save=%s", lib.c_str(), sys.c_str(), save.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeCandidates(JNIEnv *env, jclass, jstring jpath) {
+	const char *p = jpath ? env->GetStringUTFChars(jpath, nullptr) : nullptr;
+	std::string out = sphynx_ui_candidates(p ? p : "");
+	if (p) env->ReleaseStringUTFChars(jpath, p);
+	return ToJavaString(env, out);
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_sphynx_emulator_SphynxExtCore_nativeBuildId(JNIEnv *env, jclass) {

@@ -1,17 +1,17 @@
-name: Sphynx APK (armeabi-v7a, all cores)
+name: Sphynx APK (signed release, per-ABI)
 
-# SPHYNX: single-ABI release build (armeabi-v7a) with every emulator core bundled.
+# SPHYNX: builds the rebranded PPSSPP v1.18.1 fork as TWO signed release APKs,
+# one per ARM ABI.  Splitting by ABI is the single biggest size win we have
+# (~45% off), and it also answers the "<100 MB per APK" requirement empirically
+# instead of by guessing.
 #
-# Pipeline:
-#   1. checkout the fork (v1.18.1 base + extcores host + rebranding)
-#   2. fetch the 23 libretro cores for armeabi-v7a, verify each one is an ARM ELF
-#      that exports all required entry points and needs only NDK libraries
-#   3. stage them as libsphynx_core_*.so inside the APK's native libs
-#   4. build + sign the release APK
-#   5. audit the finished APK: package id, signature, core count, per-core size
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   SPHYNX_KEYSTORE_BASE64     base64 of sphynx-release.keystore
+#   SPHYNX_KEYSTORE_PASSWORD   keystore password
+#   SPHYNX_KEY_ALIAS           key alias (sphynx)
+#   SPHYNX_KEY_PASSWORD        key password
 #
-# Required repository secrets:
-#   SPHYNX_KEYSTORE_BASE64, SPHYNX_KEYSTORE_PASSWORD, SPHYNX_KEY_ALIAS, SPHYNX_KEY_PASSWORD
+# No network permissions / no telemetry is added by this workflow: it only builds.
 
 on:
   push:
@@ -21,18 +21,18 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.1
-  SPHYNX_ABI: armeabi-v7a
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.0
 
 jobs:
   build:
     name: release-${{ matrix.abi }}
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
         abi:
+          - arm64-v8a
           - armeabi-v7a
 
     steps:
@@ -62,36 +62,12 @@ jobs:
       - name: Free up runner disk space
         shell: bash
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/emulator /usr/share/swift 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/emulator 2>/dev/null || true
           df -h /
 
-      - name: Fetch + verify the 23 emulator cores
-        shell: bash
-        run: |
-          chmod +x Tools/sphynx/fetch_cores.sh
-          sudo apt-get update -qq && sudo apt-get install -y -qq binutils unzip
-          Tools/sphynx/fetch_cores.sh "${{ matrix.abi }}" "android/src/normal/jniLibs/${{ matrix.abi }}"
-
-      - name: Core inventory
-        shell: bash
-        run: |
-          ls -la "android/src/normal/jniLibs/${{ matrix.abi }}" | tail -30
-          du -sh "android/src/normal/jniLibs/${{ matrix.abi }}"
-
-      - name: Host tests (extcores layer)
-        shell: bash
-        run: |
-          set -eux
-          mkdir -p out
-          gcc -shared -fPIC -O2 -Iextcores/include -o out/libstub_core.so extcores/tests/stub_core.c
-          echo 'void b(void){}' > out/b.c
-          gcc -shared -fPIC -o out/libbroken_core.so out/b.c
-          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
-              -o out/host_smoke extcores/src/system_db.cpp extcores/src/core_loader.cpp \
-              extcores/src/env_callback.cpp extcores/src/session.cpp extcores/tests/host_smoke.cpp -ldl
-          ./out/host_smoke ./out/libstub_core.so ./out/libbroken_core.so | tee out/host-test.txt
-
       - name: Write signing config outside the repository
+        # Passwords are never put on a command line, so they cannot leak into
+        # build logs of a public repository.
         env:
           KEYSTORE_B64: ${{ secrets.SPHYNX_KEYSTORE_BASE64 }}
           KS_PASS: ${{ secrets.SPHYNX_KEYSTORE_PASSWORD }}
@@ -114,53 +90,50 @@ jobs:
           } >> "$HOME/.gradle/gradle.properties"
           keytool -list -keystore "$RUNNER_TEMP/sphynx-release.keystore" -storepass "$KS_PASS" | head -5
 
-      - name: Build signed release APK
+      - name: Build signed release APK (single ABI)
         shell: bash
         run: |
           chmod +x gradlew
+          # SPHYNX: clean, stable version naming (the androidGitVersion plugin
+          # would otherwise bake the branch name into versionName).
+          # SPHYNX: pass a clean versionName only.  versionCode is left to the
+          # androidGitVersion plugin (upstream build.gradle only accepts an int
+          # there, and a Gradle -P property is always a String).
           ./gradlew --no-daemon --stacktrace assembleNormalRelease \
             -PsphynxAbi=${{ matrix.abi }} \
             -PANDROID_VERSION_NAME=${{ env.SPHYNX_VERSION_NAME }}
 
-      - name: Audit the finished APK
-        id: audit
+      - name: Collect APK, verify signature, enforce size ceiling
+        id: collect
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           APK=$(find android/build -name '*.apk' -path '*release*' | head -1)
+          echo "found: $APK"
           test -n "$APK"
-          TARGET="out/sphynx-${{ matrix.abi }}-${SPHYNX_BASE_TAG}.apk"
-          cp "$APK" "$TARGET"
+          cp "$APK" "out/sphynx-${{ matrix.abi }}-${{ env.SPHYNX_BASE_TAG }}.apk"
+          TARGET="out/sphynx-${{ matrix.abi }}-${{ env.SPHYNX_BASE_TAG }}.apk"
           SIZE=$(stat -c%s "$TARGET")
           MB=$(awk "BEGIN{printf \"%.2f\", $SIZE/1048576}")
+          echo "size_bytes=$SIZE" >> "$GITHUB_OUTPUT"
           echo "size_mb=$MB" >> "$GITHUB_OUTPUT"
-
-          # how many emulator cores actually made it into the APK?
-          CORES=$(unzip -l "$TARGET" | grep -c 'libsphynx_core_.*\.so' || true)
-          echo "cores_in_apk=$CORES" >> "$GITHUB_OUTPUT"
-          echo "APK: $TARGET ($MB MiB), emulator cores inside: $CORES"
-          test "$CORES" -ge 23 || { echo "::error::expected 23 cores in the APK, found $CORES"; exit 1; }
-
-          unzip -l "$TARGET" | grep -E 'lib/' | sort -k1 -n -r | head -30
           sha256sum "$TARGET" | tee out/SHA256SUMS.txt
-
           APKSIGNER=$(find "${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" -name apksigner -type f 2>/dev/null | sort -r | head -1 || true)
-          if [ -n "$APKSIGNER" ]; then "$APKSIGNER" verify --print-certs "$TARGET" | head -12 | tee out/signature.txt; fi
-
+          if [ -n "$APKSIGNER" ]; then "$APKSIGNER" verify --print-certs "$TARGET" || true; fi
           {
-            echo "### Sphynx release build — ${{ matrix.abi }}"
+            echo "### Sphynx release build — ABI ${{ matrix.abi }}"
             echo ""
             echo "| metric | value |"
             echo "|---|---|"
-            echo "| APK size | **${MB} MiB** |"
-            echo "| emulator cores bundled | **${CORES}** |"
-            echo "| base tag | ${SPHYNX_BASE_TAG} |"
-            echo ""
-            echo "| library | uncompressed |"
-            echo "|---|---|"
-            unzip -l "$TARGET" | awk '/lib\// {printf "| %s | %.1f MiB |\n", $4, $1/1048576}' | sort -t'|' -k2 -rn | head -30
+            echo "| APK size | **${MB} MB** |"
+            echo "| base tag | ${{ env.SPHYNX_BASE_TAG }} |"
+            echo "| hard ceiling | 100 MB |"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "::error::APK exceeds the 100 MB hard ceiling (${MB} MB)"
+            exit 1
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

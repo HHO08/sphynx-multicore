@@ -122,6 +122,15 @@ bool Session::Start(const std::string &core_path, const std::string &content_pat
 		return false;
 	}
 
+	// The core's real audio rate matters for the player's AudioTrack.
+	{
+		retro_system_av_info av{};
+		if (loader_.sym->get_system_av_info) {
+			loader_.sym->get_system_av_info(&av);
+			if (av.timing.sample_rate > 1000.0) sample_rate_ = av.timing.sample_rate;
+		}
+	}
+
 	running_ = true;
 	return true;
 }

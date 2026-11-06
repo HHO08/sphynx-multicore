@@ -61,6 +61,8 @@
 #include "UI/Store.h"
 #include "UI/InstallZipScreen.h"
 #include "Core/Config.h"
+// SPHYNX: C bridge to the external-core host.
+#include "sphynx_ui_api.h"
 #include "Core/Loaders.h"
 #include "GPU/GPUInterface.h"
 #include "Common/Data/Text/I18n.h"
@@ -74,6 +76,16 @@
 bool MainScreen::showHomebrewTab = false;
 
 bool LaunchFile(ScreenManager *screenManager, const Path &path) {
+	// SPHYNX: hand non-PSP content to the Sphynx player screen. PSP files fall
+	// straight through to the original code below, unchanged.
+	if (path.Type() == PathType::NATIVE) {
+		const std::string nativePath = path.ToString();
+		if (sphynx_ui_is_external(nativePath.c_str()) == 1) {
+			System_SendMessage("sphynx_launch", nativePath.c_str());
+			return true;
+		}
+	}
+
 	// Depending on the file type, we don't want to launch EmuScreen at all.
 	auto loader = ConstructFileLoader(path);
 	if (!loader) {
@@ -873,7 +885,9 @@ void GameBrowser::Refresh() {
 		}
 	} else if (!listingPending_) {
 		std::vector<File::FileInfo> fileInfo;
-		path_.GetListing(fileInfo, "iso:cso:chd:pbp:elf:prx:ppdmp:");
+		// SPHYNX: also list every file of every supported system, so the
+		// game list shows PSP and non-PSP titles side by side.
+		path_.GetListing(fileInfo, sphynx_ui_extension_filter());
 		for (size_t i = 0; i < fileInfo.size(); i++) {
 			bool isGame = !fileInfo[i].isDirectory;
 			bool isSaveData = false;

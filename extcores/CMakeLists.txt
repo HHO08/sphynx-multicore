@@ -16,11 +16,15 @@ set(SPHYNX_EXTCORE_SOURCES
 	src/core_loader.cpp
 	src/env_callback.cpp
 	src/session.cpp
+	src/png_write.cpp
+	src/ui_api.cpp
 )
 
 # JNI bridge is only meaningful on Android; it compiles to stubs elsewhere.
 if(ANDROID)
-	list(APPEND SPHYNX_EXTCORE_SOURCES jni/sphynx_extcore_jni.cpp)
+	list(APPEND SPHYNX_EXTCORE_SOURCES
+		jni/sphynx_extcore_jni.cpp
+		src/player_android.cpp)
 	set(SPHYNX_JNI TRUE)
 endif()
 
@@ -39,6 +43,15 @@ set_target_properties(sphynx_extcore PROPERTIES
 
 if(SPHYNX_JNI)
 	target_compile_definitions(sphynx_extcore PRIVATE SPHYNX_ANDROID=1)
+	# The player screen renders with raw GLES2 into its own surface.
+	find_library(SPHYNX_GLES_LIB GLESv2)
+	find_library(SPHYNX_EGL_LIB EGL)
+	if(SPHYNX_GLES_LIB)
+		target_link_libraries(sphynx_extcore PRIVATE ${SPHYNX_GLES_LIB})
+	endif()
+	if(SPHYNX_EGL_LIB)
+		target_link_libraries(sphynx_extcore PRIVATE ${SPHYNX_EGL_LIB})
+	endif()
 	# liblog for the Android log, libdl for dlopen() of the cores.
 	find_library(SPHYNX_LOG_LIB log)
 	find_library(SPHYNX_DL_LIB dl)

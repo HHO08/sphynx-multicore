@@ -7,4 +7,10 @@
 	<string name="bad_disc_title">Unsupported disc</string>
 	<string name="bad_disc_message">The file you selected wasn\'t recognized as a game.</string>
 
+
+	<!-- SPHYNX: user-facing messages, in PPSSPP's own tone. -->
+	<string name="sphynxUnknownContent">Could not recognise this game file.</string>
+	<string name="sphynxCoreMissing">The emulator core for this system is missing in this build.</string>
+	<string name="sphynxStartFailed">Could not start this system:</string>
+	<string name="sphynxCoreStopped">The emulator stopped (it may be too heavy for this device).</string>
 </resources>

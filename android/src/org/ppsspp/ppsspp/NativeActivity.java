@@ -1403,6 +1403,19 @@ public abstract class NativeActivity extends Activity {
 					return false;
 				}
 			}
+		} else if (command.equals("sphynx_launch")) {
+			// SPHYNX: the C++ game list decided this file belongs to an external
+			// system; open it in the dedicated player screen.
+			try {
+				Intent intent = new Intent(this, org.sphynx.emulator.SphynxPlayerActivity.class);
+				intent.putExtra(org.sphynx.emulator.SphynxPlayerActivity.EXTRA_PATH, params);
+				startActivity(intent);
+				return true;
+			} catch (Exception e) {
+				NativeApp.reportException(e, params);
+				Log.e(TAG, e.toString());
+				return false;
+			}
 		} else if (command.equals("launchEmail")) {
 			try {
 				Intent send = new Intent(Intent.ACTION_SENDTO);

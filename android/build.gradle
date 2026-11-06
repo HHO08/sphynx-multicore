@@ -187,7 +187,20 @@ android {
 				}
 			}
 			ndk {
-				abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86_64'
+				// SPHYNX: per-ABI build.  We ship one APK per ARM ABI instead of a fat
+				// APK (this is the largest single size win: ~45% off the download).
+				// x86_64 is dropped on purpose: Sphynx targets ARM devices only.
+				// Pass -PsphynxAbi=arm64-v8a (or armeabi-v7a) to build one ABI.
+				def sphynxAbi = project.findProperty('sphynxAbi')
+				if (sphynxAbi != null && !sphynxAbi.isEmpty()) {
+					abiFilters(*sphynxAbi.split(','))
+				} else {
+					// SPHYNX: 32-bit ARM only. The owner chose to ship a single
+					// armeabi-v7a APK: it halves the build time and memory while
+					// still covering every ARM device, because 64-bit phones run
+					// 32-bit code.
+					abiFilters 'armeabi-v7a'
+				}
 			}
 		}
 		legacy {
