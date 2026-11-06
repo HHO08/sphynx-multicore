@@ -682,7 +682,9 @@ void LogoScreen::Next() {
 		switch (afterLogoScreen_) {
 		case AfterLogoScreen::TO_GAME_SETTINGS:
 			if (!gamePath.empty()) {
-				screenManager()->switchScreen(new EmuScreen(gamePath));
+				// SPHYNX: never hand a non-PSP file to the PSP core.
+				if (!SphynxRouteExternal(screenManager(), gamePath))
+					screenManager()->switchScreen(new EmuScreen(gamePath));
 			} else {
 				screenManager()->switchScreen(new MainScreen());
 			}
@@ -694,7 +696,9 @@ void LogoScreen::Next() {
 		case AfterLogoScreen::DEFAULT:
 		default:
 			if (boot_filename.size()) {
-				screenManager()->switchScreen(new EmuScreen(gamePath));
+				// SPHYNX: a game opened from another app can be an external one.
+				if (!SphynxRouteExternal(screenManager(), gamePath))
+					screenManager()->switchScreen(new EmuScreen(gamePath));
 			} else {
 				screenManager()->switchScreen(new MainScreen());
 			}
@@ -722,7 +726,10 @@ void LogoScreen::update() {
 
 void LogoScreen::sendMessage(UIMessage message, const char *value) {
 	if (message == UIMessage::REQUEST_GAME_BOOT && screenManager()->topScreen() == this) {
-		screenManager()->switchScreen(new EmuScreen(Path(value)));
+		// SPHYNX: same guard for the "boot this file now" message.
+		const Path sphynxBootPath(value);
+		if (!SphynxRouteExternal(screenManager(), sphynxBootPath))
+			screenManager()->switchScreen(new EmuScreen(sphynxBootPath));
 	}
 }
 

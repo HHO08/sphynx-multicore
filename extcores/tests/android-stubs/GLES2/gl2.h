@@ -18,6 +18,7 @@ typedef char GLchar; typedef void GLvoid;
 #define GL_TEXTURE_WRAP_S 0x2802
 #define GL_TEXTURE_WRAP_T 0x2803
 #define GL_LINEAR 0x2601
+#define GL_NEAREST 0x2600
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_VERTEX_SHADER 0x8B31

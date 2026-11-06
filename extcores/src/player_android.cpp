@@ -23,6 +23,10 @@
 // header is vendored in extcores/include so we never depend on the core source.
 #include "libretro.h"
 #include "android_paths.h"
+// Save states and the BIOS tree are plain portable C++ so the host tests cover
+// exactly the code that ships.
+#include "state_file.h"
+#include "bios_layout.h"
 
 #ifdef SPHYNX_ANDROID
 
@@ -31,7 +35,9 @@
 
 #include <GLES2/gl2.h>
 
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -51,6 +57,67 @@ namespace {
 std::mutex g_session_mutex;
 std::shared_ptr<sphynx::Session> g_session;
 std::string g_error;
+
+// --- runtime settings (the player's Settings dialog) ------------------------
+// Atomics because the GL thread, the audio thread and the UI thread all read
+// them while the dialog writes them. No lock is needed and nothing can stall a
+// frame.
+struct PlayerSettings {
+	std::atomic<bool> sound{true};
+	std::atomic<bool> pad{true};
+	std::atomic<bool> fast_forward{false};
+	std::atomic<bool> smooth{false};     // GL_LINEAR vs GL_NEAREST
+	std::atomic<bool> show_fps{true};
+	std::atomic<int> aspect{0};          // 0 = fit, 1 = stretch, 2 = 4:3
+};
+PlayerSettings g_settings;
+
+// Where this game's save states go, and two stable tags that identify it:
+// states are refused when the core tag does not match, so a Game Boy state can
+// never be loaded into a running SNES game.
+std::string g_save_dir;
+std::string g_core_tag;
+std::string g_game_tag;
+std::string g_bios_dir;
+std::string g_system_key;
+
+/** Last path component, e.g. "libsphynx_core_gambatte.so". */
+std::string BaseName(const std::string &path) {
+	const size_t slash = path.find_last_of("/\\");
+	return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+/** Drops the last extension: "Ys III (USA).sfc" -> "Ys III (USA)". */
+std::string StripExtension(const std::string &name) {
+	const size_t dot = name.find_last_of('.');
+	return dot == std::string::npos || dot == 0 ? name : name.substr(0, dot);
+}
+
+/** "libsphynx_core_gambatte.so" -> "gambatte": the tag stored in a state file. */
+std::string CoreTagFromPath(const std::string &core_path) {
+	std::string base = StripExtension(BaseName(core_path));
+	const std::string prefix = "libsphynx_core_";
+	if (base.compare(0, prefix.size(), prefix) == 0) base = base.substr(prefix.size());
+	if (!base.empty() && base[0] == 'l' && base.compare(0, 4, "lib.") == 0) base = base.substr(4);
+	return base;
+}
+
+/** Keeps a file name usable on any filesystem (the tag ends up in a path). */
+std::string SafeFileName(const std::string &name) {
+	std::string out;
+	for (char c : name) {
+		switch (c) {
+		case '/': case '\\': case ':': case '*': case '?': case '"': case '<': case '>': case '|':
+		case '\n': case '\r': case '\t':
+			out += '_';
+			break;
+		default:
+			out += c;
+		}
+	}
+	if (out.empty()) out = "game";
+	return out.size() > 96 ? out.substr(0, 96) : out;
+}
 
 struct CaptureSink : sphynx::FrameSink {
 	std::vector<uint8_t> pixels;   // converted to RGBA8888, ready for GL
@@ -113,6 +180,9 @@ size_t g_audio_read = 0, g_audio_write = 0, g_audio_count = 0;
 struct AudioSink : sphynx::AudioSink {
 	void OnAudio(const int16_t *frames, size_t frame_count) override {
 		if (!frames || !frame_count) return;
+		// Muting must not stop the core: some cores run their timing off the
+		// audio callback, so the samples are produced and simply thrown away.
+		if (!g_settings.sound.load()) return;
 		std::lock_guard<std::mutex> lock(g_audio_mutex);
 		if (g_audio_ring.empty()) return;
 		const size_t cap = g_audio_ring.size() / 2;
@@ -223,6 +293,11 @@ void RenderFrame(int view_w, int view_h) {
 
 	if (g_capture.fresh && g_capture.w && g_capture.h) {
 		glBindTexture(GL_TEXTURE_2D, g_tex);
+		// Settings -> Display filter. Applied while the texture is bound so the
+		// change is visible on the very next frame, without a restart.
+		const GLint filter = g_settings.smooth.load() ? GL_LINEAR : GL_NEAREST;
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
 		if (g_tex_w != g_capture.w || g_tex_h != g_capture.h) {
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, GLsizei(g_capture.w), GLsizei(g_capture.h),
 			             0, GL_RGBA, GL_UNSIGNED_BYTE, g_capture.pixels.data());
@@ -237,14 +312,21 @@ void RenderFrame(int view_w, int view_h) {
 
 	if (!g_tex_w || !g_tex_h || !g_prog) return;
 
-	// Aspect-fit inside the view (integer-free, keeps the picture undistorted).
-	const float srcAspect = float(g_tex_w) / float(g_tex_h);
-	const float dstAspect = float(view_w) / float(view_h);
+	// Settings -> Screen: 0 = fit inside the view (nothing distorted),
+	// 1 = stretch to the whole screen, 2 = force a 4:3 picture.
 	float sx = 1.0f, sy = 1.0f;
-	if (srcAspect > dstAspect) {
-		sy = dstAspect / srcAspect;
+	const int aspect_mode = g_settings.aspect.load();
+	if (aspect_mode == 1) {
+		sx = sy = 1.0f;
 	} else {
-		sx = srcAspect / dstAspect;
+		const float srcAspect = aspect_mode == 2 ? (4.0f / 3.0f)
+		                                        : float(g_tex_w) / float(g_tex_h);
+		const float dstAspect = float(view_w) / float(view_h);
+		if (srcAspect > dstAspect) {
+			sy = dstAspect / srcAspect;
+		} else {
+			sx = srcAspect / dstAspect;
+		}
 	}
 
 	glUseProgram(g_prog);
@@ -295,6 +377,11 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeStart(JNIEnv *env, jclass, jstring j
 		return env->NewStringUTF(g_error.c_str());
 	}
 
+	g_bios_dir = sysdir;
+	g_save_dir = savedir;
+	g_core_tag = CoreTagFromPath(core);
+	g_game_tag = SafeFileName(StripExtension(BaseName(content)));
+
 	{
 		std::lock_guard<std::mutex> lock(g_session_mutex);
 		g_session.reset();   // destroys the previous session once its frame ends
@@ -342,7 +429,12 @@ Java_org_sphynx_emulator_SphynxPlayer_nativeFrame(JNIEnv *, jclass, jint w, jint
 		session = g_session;   // keeps the session alive for the whole frame
 	}
 	if (!session) return -1;
-	const bool ok = session->RunFrame();
+	bool ok = session->RunFrame();
+	// Settings -> Fast forward: extra frames per displayed frame. 2 is enough to
+	// skip cutscenes on a 32-bit device without starving the renderer.
+	if (ok && g_settings.fast_forward.load()) {
+		for (int i = 0; i < 2 && ok; ++i) ok = session->RunFrame();
+	}
 	RenderFrame(int(w), int(h));
 	return ok ? 0 : 1;
 }
@@ -401,6 +493,121 @@ JNIEXPORT void JNICALL
 Java_org_sphynx_emulator_SphynxPlayer_nativeReleaseAll(JNIEnv *, jclass) {
 	std::lock_guard<std::mutex> lock(g_input_mutex);
 	for (auto &b : g_buttons) b = 0;
+}
+
+// ---------------------------------------------------------------------------
+//  Save states
+// ---------------------------------------------------------------------------
+// The emulator core owns the snapshot (retro_serialize); this layer only puts
+// it on disk with a tag + checksum so a wrong or damaged file is refused with a
+// readable message instead of a corrupted game.
+//
+// Returns "" on success, or the reason in plain words (shown as a toast).
+
+namespace {
+
+std::string SaveStateToSlot(int slot) {
+	std::shared_ptr<sphynx::Session> session;
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		session = g_session;
+	}
+	if (!session) return "no game is running";
+	std::vector<uint8_t> state;
+	if (!session->SaveState(&state) || state.empty())
+		return "this system does not support save states";
+	std::string err;
+	const std::string path = sphynx::StateFilePath(g_save_dir, g_game_tag, slot);
+	if (!sphynx::WriteStateFile(path, g_core_tag, state, &err)) return err;
+	PLOG("state saved: %s (%zu bytes)", path.c_str(), state.size());
+	return std::string();
+}
+
+std::string LoadStateFromSlot(int slot) {
+	std::shared_ptr<sphynx::Session> session;
+	{
+		std::lock_guard<std::mutex> lock(g_session_mutex);
+		session = g_session;
+	}
+	if (!session) return "no game is running";
+	std::string err;
+	std::vector<uint8_t> state;
+	const std::string path = sphynx::StateFilePath(g_save_dir, g_game_tag, slot);
+	if (!sphynx::ReadStateFile(path, g_core_tag, &state, &err)) return err;
+	if (!session->LoadState(state)) return "the emulator refused this save state";
+	PLOG("state loaded: %s (%zu bytes)", path.c_str(), state.size());
+	return std::string();
+}
+
+}  // namespace
+
+JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeSaveState(JNIEnv *env, jclass, jint slot) {
+	return env->NewStringUTF(SaveStateToSlot(int(slot)).c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeLoadState(JNIEnv *env, jclass, jint slot) {
+	return env->NewStringUTF(LoadStateFromSlot(int(slot)).c_str());
+}
+
+// True when this slot already holds a state for the running game: the dialog
+// greys out empty slots instead of letting the user press a dead button.
+JNIEXPORT jboolean JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeHasState(JNIEnv *, jclass, jint slot) {
+	if (g_save_dir.empty()) return JNI_FALSE;
+	const std::string path = sphynx::StateFilePath(g_save_dir, g_game_tag, int(slot));
+	return sphynx::StateFileExists(path) ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---------------------------------------------------------------------------
+//  Settings
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeSetOption(JNIEnv *env, jclass, jstring jkey,
+                                                      jint value) {
+	const std::string key = JStr(env, jkey);
+	if (key == "sound") g_settings.sound.store(value != 0);
+	else if (key == "pad") g_settings.pad.store(value != 0);
+	else if (key == "fastforward") g_settings.fast_forward.store(value != 0);
+	else if (key == "smooth") g_settings.smooth.store(value != 0);
+	else if (key == "showfps") g_settings.show_fps.store(value != 0);
+	else if (key == "aspect") g_settings.aspect.store(value < 0 ? 0 : (value > 2 ? 2 : value));
+	else PLOG("unknown setting: %s", key.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeGetOption(JNIEnv *env, jclass, jstring jkey) {
+	const std::string key = JStr(env, jkey);
+	if (key == "sound") return g_settings.sound.load() ? 1 : 0;
+	if (key == "pad") return g_settings.pad.load() ? 1 : 0;
+	if (key == "fastforward") return g_settings.fast_forward.load() ? 1 : 0;
+	if (key == "smooth") return g_settings.smooth.load() ? 1 : 0;
+	if (key == "showfps") return g_settings.show_fps.load() ? 1 : 0;
+	if (key == "aspect") return g_settings.aspect.load();
+	return 0;
+}
+
+// "complete" / "missing sega_101.bin, mpr-17933.bin" / "no BIOS needed".
+// Shown on the status line and inside the failure screen, so the user always
+// knows whether a BIOS is what is missing.
+JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeBiosStatus(JNIEnv *env, jclass) {
+	// The player always hands us the per-system folder, so report against it.
+	if (g_bios_dir.empty()) return env->NewStringUTF("no BIOS needed");
+	if (g_system_key.empty()) return env->NewStringUTF("unknown");
+	if (!sphynx::FindBiosSystem(g_system_key.c_str()))
+		return env->NewStringUTF("not needed by this system");
+	const std::string missing = sphynx::MissingBiosFilesInDir(g_bios_dir, g_system_key.c_str());
+	if (missing.empty()) return env->NewStringUTF("complete");
+	return env->NewStringUTF(("missing " + missing).c_str());
+}
+
+// Which system is running. Told once by Java so the BIOS status is precise.
+JNIEXPORT void JNICALL
+Java_org_sphynx_emulator_SphynxPlayer_nativeSetSystem(JNIEnv *env, jclass, jstring jkey) {
+	g_system_key = JStr(env, jkey);
 }
 
 JNIEXPORT jstring JNICALL

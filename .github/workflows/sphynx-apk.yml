@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.2
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.3
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -86,7 +86,7 @@ jobs:
           gcc -shared -fPIC -O2 -Iextcores/include -o out/libstub_core.so extcores/tests/stub_core.c
           echo 'void b(void){}' > out/b.c
           gcc -shared -fPIC -o out/libbroken_core.so out/b.c
-          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
+          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_smoke extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp extcores/tests/host_smoke.cpp -ldl
           ./out/host_smoke ./out/libstub_core.so ./out/libbroken_core.so | tee out/host-test.txt
@@ -97,18 +97,31 @@ jobs:
               -o out/host_ui_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
-              extcores/src/android_paths.cpp extcores/tests/host_ui_test.cpp -ldl
+              extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
+              extcores/src/state_file.cpp extcores/tests/host_ui_test.cpp -ldl
           ./out/host_ui_test | tee out/host-ui-test.txt
 
           # Stage 5: the real play path, end to end on the host toolchain —
           # content:// URI resolution, thumbnail through a dlopen()ed core,
           # player session (frames/audio/input/save state).
-          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
+          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_play_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
-              extcores/src/android_paths.cpp extcores/tests/host_play_test.cpp -ldl
+              extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
+              extcores/src/state_file.cpp extcores/tests/host_play_test.cpp -ldl
           ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
+
+          # Stage 6: PSP/SYSTEMS_BIOS (16 folders, READMEs, adoption of an
+          # existing PSP/SYSTEM, missing-file reporting) and the save state file
+          # format (round trip, wrong core, corruption).
+          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
+              -o out/host_bios_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
+              extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/png_write.cpp extcores/src/ui_api.cpp \
+              extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
+              extcores/src/state_file.cpp extcores/tests/host_bios_test.cpp -ldl
+          ./out/host_bios_test | tee out/host-bios-test.txt
 
           # The Android-only translation units never get compiled on a runner
           # without the NDK; type-check them against the stub headers so a typo
@@ -116,9 +129,17 @@ jobs:
           JAVA_HOME="${JAVA_HOME:-$(dirname $(dirname $(readlink -f $(which javac))))}"
           g++ -std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter -DSPHYNX_ANDROID=1 \
               -Iextcores/tests/android-stubs -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
-              -Iextcores/include \
+              -Iextcores/include -Iextcores/src \
               extcores/src/player_android.cpp extcores/jni/sphynx_extcore_jni.cpp \
-              extcores/src/android_paths.cpp extcores/src/ui_api.cpp
+              extcores/src/android_paths.cpp extcores/src/ui_api.cpp \
+              extcores/src/bios_layout.cpp extcores/src/state_file.cpp
+
+          # Stage 6: every game launch path must go through SphynxRouteExternal().
+          # This is the static guard for the "Failed initializing CPU or memory"
+          # bug, which came back once because GameScreen::OnPlay skipped
+          # LaunchFile(). It also proves the player still offers
+          # Save state / Load state / Settings.
+          python3 Tools/sphynx/check_routing.py . | tee out/routing-check.txt
 
       - name: Write signing config outside the repository
         env:

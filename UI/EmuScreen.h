@@ -83,6 +83,9 @@ private:
 	UI::Event OnDevMenu;
 	UI::Event OnChatMenu;
 	bool bootPending_ = true;
+	// SPHYNX: set once this screen has checked whether the file is really
+	// a PSP game, so the check runs exactly once per screen.
+	bool sphynxRouted_ = false;
 	Path gamePath_;
 
 	// Something invalid was loaded, don't try to emulate

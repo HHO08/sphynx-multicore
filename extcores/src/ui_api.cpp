@@ -12,6 +12,7 @@
 #include "sphynx_ui_api.h"
 #include "png_write.h"
 #include "android_paths.h"
+#include "bios_layout.h"
 
 #include <chrono>
 #include <mutex>
@@ -28,6 +29,8 @@ namespace {
 std::string g_native_lib_dir;
 std::string g_system_dir;
 std::string g_save_dir;
+// PPSSPP's memstick root (".../PSP"): the parent of the SYSTEMS_BIOS tree.
+std::string g_memstick_dir;
 std::string g_last_error = "none";
 
 struct FrameGrabber : sphynx::FrameSink {
@@ -325,6 +328,70 @@ const char *sphynx_ui_candidates(const char *path) {
 }
 
 const char *sphynx_ui_last_error(void) { return g_last_error.c_str(); }
+
+// ---------------------------------------------------------------------------
+//  BIOS tree (PSP/SYSTEMS_BIOS)
+// ---------------------------------------------------------------------------
+
+void sphynx_ui_set_memstick(const char *memstick_dir) {
+	g_memstick_dir = memstick_dir ? memstick_dir : "";
+}
+
+int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
+	if (memstick_dir && *memstick_dir) g_memstick_dir = memstick_dir;
+	if (g_memstick_dir.empty()) {
+		g_last_error = "no memstick folder: the BIOS tree was not created";
+		return -1;
+	}
+	std::string report;
+	const int made = sphynx::EnsureBiosTree(g_memstick_dir, &report);
+	if (made < 0) {
+		g_last_error = "BIOS tree: " + report;
+		return -1;
+	}
+	// Anything the user already keeps in PSP/SYSTEM is copied into the matching
+	// per-system folder, so an existing PPSSPP setup needs no manual work.
+	std::string adopted_report;
+	const int adopted = sphynx::AdoptLegacyBios(g_memstick_dir, &adopted_report);
+	g_last_error = "bios tree ready (" + std::to_string(made) + " new folders, " +
+	               std::to_string(adopted) + " files adopted)";
+	return made;
+}
+
+const char *sphynx_ui_bios_root(void) {
+	static std::string root;
+	root = sphynx::BiosRoot(g_memstick_dir);
+	return root.c_str();
+}
+
+char *sphynx_ui_bios_dir_for_system(const char *system_key) {
+	if (!system_key || !*system_key || g_memstick_dir.empty()) return nullptr;
+	std::string dir = sphynx::BiosDirForSystem(g_memstick_dir, system_key);
+	if (dir.empty()) return nullptr;   // this system needs no BIOS
+	// Create it on demand: the user may have deleted the folder, or the app may
+	// have been reinstalled while the memory card stayed in place.
+	std::string report;
+	sphynx::EnsureBiosTree(g_memstick_dir, &report);
+	if (!sphynx::DirectoryExists(dir)) return nullptr;
+	char *out = static_cast<char *>(std::malloc(dir.size() + 1));
+	if (!out) return nullptr;
+	std::memcpy(out, dir.c_str(), dir.size() + 1);
+	return out;
+}
+
+char *sphynx_ui_bios_missing(const char *system_key) {
+	const std::string missing = sphynx::MissingBiosFiles(g_memstick_dir, system_key);
+	char *out = static_cast<char *>(std::malloc(missing.size() + 1));
+	if (!out) return nullptr;
+	std::memcpy(out, missing.c_str(), missing.size() + 1);
+	return out;
+}
+
+const char *sphynx_ui_bios_status(const char *system_key) {
+	static std::string status;
+	status = sphynx::BiosStatusForSystem(g_memstick_dir, system_key);
+	return status.c_str();
+}
 
 const char *sphynx_ui_extension_filter(void) {
 	// Built once: PPSSPP's own extensions plus every extension of every Sphynx

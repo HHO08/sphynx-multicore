@@ -145,3 +145,7 @@ RAPrefs_PPSSPP.cfg
 cmake-build-*/
 
 /.vscode/
+
+# SPHYNX: python bytecode from the overlay scripts
+__pycache__/
+*.pyc

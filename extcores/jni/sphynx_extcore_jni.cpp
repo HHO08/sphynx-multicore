@@ -229,4 +229,63 @@ Java_org_sphynx_emulator_SphynxExtCore_nativeStop(JNIEnv *, jclass) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+//  BIOS tree: PSP/SYSTEMS_BIOS
+// ---------------------------------------------------------------------------
+
+// Creates the whole tree (16 system folders + READMEs) and adopts anything the
+// user already had in PSP/SYSTEM. Returns the number of folders created, or -1.
+extern "C" JNIEXPORT jint JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeEnsureBiosTree(JNIEnv *env, jclass, jstring jmemstick) {
+	const char *p = jmemstick ? env->GetStringUTFChars(jmemstick, nullptr) : nullptr;
+	const int made = sphynx_ui_ensure_bios_tree(p ? p : "");
+	if (p) env->ReleaseStringUTFChars(jmemstick, p);
+	SXLOG("bios tree: %d new folders (%s)", made, sphynx_ui_last_error());
+	return made;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeSetMemstick(JNIEnv *env, jclass, jstring jmemstick) {
+	const char *p = jmemstick ? env->GetStringUTFChars(jmemstick, nullptr) : nullptr;
+	sphynx_ui_set_memstick(p ? p : "");
+	if (p) env->ReleaseStringUTFChars(jmemstick, p);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBiosRoot(JNIEnv *env, jclass) {
+	return ToJavaString(env, std::string(sphynx_ui_bios_root()));
+}
+
+// Folder of one system, created on demand. "" when the system needs no BIOS.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBiosDir(JNIEnv *env, jclass, jstring jkey) {
+	const char *k = jkey ? env->GetStringUTFChars(jkey, nullptr) : nullptr;
+	char *dir = sphynx_ui_bios_dir_for_system(k ? k : "");
+	if (k) env->ReleaseStringUTFChars(jkey, k);
+	if (!dir) return ToJavaString(env, std::string());
+	jstring out = ToJavaString(env, std::string(dir));
+	sphynx_ui_free(dir);
+	return out;
+}
+
+// Comma separated list of expected files that are missing from that folder.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBiosMissing(JNIEnv *env, jclass, jstring jkey) {
+	const char *k = jkey ? env->GetStringUTFChars(jkey, nullptr) : nullptr;
+	char *missing = sphynx_ui_bios_missing(k ? k : "");
+	if (k) env->ReleaseStringUTFChars(jkey, k);
+	if (!missing) return ToJavaString(env, std::string());
+	jstring out = ToJavaString(env, std::string(missing));
+	sphynx_ui_free(missing);
+	return out;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBiosStatus(JNIEnv *env, jclass, jstring jkey) {
+	const char *k = jkey ? env->GetStringUTFChars(jkey, nullptr) : nullptr;
+	const std::string status = sphynx_ui_bios_status(k ? k : "");
+	if (k) env->ReleaseStringUTFChars(jkey, k);
+	return ToJavaString(env, status);
+}
+
 #endif  // SPHYNX_ANDROID

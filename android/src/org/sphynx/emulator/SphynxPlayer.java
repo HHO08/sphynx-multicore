@@ -2,8 +2,8 @@
 //  Sphynx — org.sphynx.emulator.SphynxPlayer
 //
 //  Native bridge for the playback screen. All the real work (core lifetime,
-//  video, audio ring, input) is in extcores/src/player_android.cpp; this class
-//  only names the entry points.
+//  video, audio ring, input, save states, settings) is in
+//  extcores/src/player_android.cpp; this class only names the entry points.
 //
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
@@ -22,4 +22,21 @@ public final class SphynxPlayer {
 	public static native void nativeSetButton(int retropadId, boolean down);
 	public static native void nativeReleaseAll();
 	public static native String nativeStatus();
+
+	/** Which system is running: makes the BIOS status message exact. */
+	public static native void nativeSetSystem(String systemKey);
+
+	/** "" on success, otherwise the reason (shown to the user as a toast). */
+	public static native String nativeSaveState(int slot);
+	public static native String nativeLoadState(int slot);
+
+	/** True when this slot already holds a state for the running game. */
+	public static native boolean nativeHasState(int slot);
+
+	/** Settings, persisted by the Java side in SharedPreferences. */
+	public static native void nativeSetOption(String key, int value);
+	public static native int nativeGetOption(String key);
+
+	/** "complete" / "missing sega_101.bin" / "no BIOS needed". */
+	public static native String nativeBiosStatus();
 }

@@ -42,6 +42,10 @@ ENUM_CLASS_BITOPS(BrowseFlags);
 
 bool LaunchFile(ScreenManager *screenManager, const Path &path);
 
+// SPHYNX: true when the file belongs to an external system and the player
+// screen took over; false when the caller must run its normal PSP flow.
+bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path);
+
 class GameBrowser : public UI::LinearLayout {
 public:
 	GameBrowser(int token, const Path &path, BrowseFlags browseFlags, bool *gridStyle, ScreenManager *screenManager, std::string_view lastText, std::string_view lastLink, UI::LayoutParams *layoutParams = nullptr);

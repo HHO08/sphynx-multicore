@@ -593,6 +593,9 @@ public abstract class NativeActivity extends Activity {
 		org.sphynx.emulator.SphynxExtCore.setPaths(getApplicationInfo().nativeLibraryDir,
 				org.sphynx.emulator.SphynxExtCore.systemDir(this),
 				org.sphynx.emulator.SphynxExtCore.saveDir(this));
+		// SPHYNX: create PSP/SYSTEMS_BIOS at start-up, so the BIOS folders are
+		// there the first time the user opens the app — not after a game fails.
+		org.sphynx.emulator.SphynxExtCore.ensureBiosTree(this);
 		sizeManager = new SizeManager(this);
 		TextRenderer.init(this);
 		shuttingDown = false;

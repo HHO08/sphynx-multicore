@@ -87,6 +87,8 @@
 
 #include "Core/ControlMapper.h"
 #include "Core/Config.h"
+// SPHYNX: BIOS tree + routing bridge.
+#include "sphynx_ui_api.h"
 #include "Core/ConfigValues.h"
 #include "Core/Core.h"
 #include "Core/FileLoaders/DiskCachingFileLoader.h"
@@ -117,6 +119,7 @@
 #include "UI/DevScreens.h"
 #include "UI/DiscordIntegration.h"
 #include "UI/EmuScreen.h"
+#include "UI/MainScreen.h"   // SPHYNX: SphynxRouteExternal()
 #include "UI/GameInfoCache.h"
 #include "UI/GameSettingsScreen.h"
 #include "UI/GPUDriverTestScreen.h"
@@ -748,6 +751,16 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 		}
 	}
 
+	// SPHYNX: build PSP/SYSTEMS_BIOS — one folder per system that uses a BIOS
+	// (12 mandatory + 4 recommended) with a README naming the exact files, and
+	// copy anything already sitting in PSP/SYSTEM into the matching folder.
+	// Only a real filesystem memstick folder can hold it; a Storage-Access
+	// Framework folder is handled by the Java side instead.
+	if (g_Config.memStickDirectory.Type() == PathType::NATIVE &&
+	    !g_Config.memStickDirectory.empty()) {
+		sphynx_ui_ensure_bios_tree(g_Config.memStickDirectory.ToString().c_str());
+	}
+
 	DEBUG_LOG(Log::System, "ScreenManager!");
 	g_screenManager = new ScreenManager();
 	if (g_Config.memStickDirectory.empty()) {
@@ -762,7 +775,9 @@ void NativeInit(int argc, const char *argv[], const char *savegame_dir, const ch
 		g_screenManager->switchScreen(new MainScreen());
 		g_screenManager->push(new DeveloperToolsScreen(Path()));
 	} else if (skipLogo) {
-		g_screenManager->switchScreen(new EmuScreen(boot_filename));
+		// SPHYNX: "open with" can hand us a file of any system.
+		if (!SphynxRouteExternal(g_screenManager, boot_filename))
+			g_screenManager->switchScreen(new EmuScreen(boot_filename));
 	} else {
 		g_screenManager->switchScreen(new LogoScreen(AfterLogoScreen::DEFAULT));
 	}

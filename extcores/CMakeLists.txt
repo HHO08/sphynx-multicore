@@ -22,6 +22,11 @@ set(SPHYNX_EXTCORE_SOURCES
 	# every target and covered by the host tests; only the JNI fallback inside
 	# it is Android-specific.
 	src/android_paths.cpp
+	# PSP/SYSTEMS_BIOS: the per-system BIOS folders (plain C++ so the host test
+	# covers the exact code that runs on the device).
+	src/bios_layout.cpp
+	# Save states on disk: header + core tag + checksum.
+	src/state_file.cpp
 )
 
 # JNI bridge is only meaningful on Android; it compiles to stubs elsewhere.
@@ -109,6 +114,8 @@ if(SPHYNX_BUILD_TESTS)
 		src/png_write.cpp
 		src/ui_api.cpp
 		src/android_paths.cpp
+		src/bios_layout.cpp
+		src/state_file.cpp
 	)
 	target_include_directories(sphynx_host_play PRIVATE include src)
 	target_compile_features(sphynx_host_play PRIVATE cxx_std_17)
@@ -116,5 +123,26 @@ if(SPHYNX_BUILD_TESTS)
 
 	add_test(NAME sphynx_host_play
 		COMMAND sphynx_host_play $<TARGET_FILE:sphynx_stub_core>
+		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+	# BIOS tree (PSP/SYSTEMS_BIOS) + save state files.
+	add_executable(sphynx_host_bios
+		tests/host_bios_test.cpp
+		src/system_db.cpp
+		src/core_loader.cpp
+		src/env_callback.cpp
+		src/session.cpp
+		src/png_write.cpp
+		src/ui_api.cpp
+		src/android_paths.cpp
+		src/bios_layout.cpp
+		src/state_file.cpp
+	)
+	target_include_directories(sphynx_host_bios PRIVATE include src)
+	target_compile_features(sphynx_host_bios PRIVATE cxx_std_17)
+	target_link_libraries(sphynx_host_bios PRIVATE ${CMAKE_DL_LIBS})
+
+	add_test(NAME sphynx_host_bios
+		COMMAND sphynx_host_bios
 		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endif()

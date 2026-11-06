@@ -70,6 +70,36 @@ SPHYNX_UI_EXPORT const char *sphynx_ui_last_error(void);
 // PPSSPP's directory listing expects ("nes:gb:gba:...").
 SPHYNX_UI_EXPORT const char *sphynx_ui_extension_filter(void);
 
+// ---------------------------------------------------------------------------
+// BIOS tree: <memstick>/SYSTEMS_BIOS
+// ---------------------------------------------------------------------------
+// Called once at startup with PPSSPP's own memstick folder (the "PSP" folder
+// the user already knows). Creates one sub-folder per system that needs a BIOS
+// — the 12 mandatory ones and the 4 recommended ones — with a README naming
+// the exact files, and copies anything already sitting in PSP/SYSTEM into the
+// matching folder. Never overwrites or deletes a user file.
+//
+// Returns the number of folders created, or -1 when the folder is unusable.
+SPHYNX_UI_EXPORT int sphynx_ui_ensure_bios_tree(const char *memstick_dir);
+
+// Same value, without creating anything (used by Java when the C++ start-up
+// path has not run yet, e.g. the player opened directly).
+SPHYNX_UI_EXPORT void sphynx_ui_set_memstick(const char *memstick_dir);
+
+// "…/PSP/SYSTEMS_BIOS" or "" when unknown.
+SPHYNX_UI_EXPORT const char *sphynx_ui_bios_root(void);
+
+// Folder for one system ("psx", "saturn", …), created on demand.
+// malloc'd string; free with sphynx_ui_free(). NULL when the system needs no
+// BIOS, which is the signal to fall back to PPSSPP's normal SYSTEM folder.
+SPHYNX_UI_EXPORT char *sphynx_ui_bios_dir_for_system(const char *system_key);
+
+// Comma-separated expected files that are missing ("" = complete or no BIOS).
+SPHYNX_UI_EXPORT char *sphynx_ui_bios_missing(const char *system_key);
+
+// "complete" / "missing x, y" / "no BIOS needed".
+SPHYNX_UI_EXPORT const char *sphynx_ui_bios_status(const char *system_key);
+
 #ifdef __cplusplus
 }
 #endif

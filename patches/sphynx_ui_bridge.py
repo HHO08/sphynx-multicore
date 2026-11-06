@@ -64,45 +64,64 @@ def patch_mainscreen(repo: Path) -> None:
     else:
         print("  !! MainScreen: filter anchor not found")
 
-    # (b) launch routing -----------------------------------------------------
-    # Canonical form, applied idempotently: strip whatever earlier revision put
-    # here, then insert exactly this block once.
+    # (b) the routing helper -------------------------------------------------
+    #
+    # This is THE fix for "Failed initializing CPU or memory". Tapping a game in
+    # the grid goes MainScreen -> GameScreen -> EmuScreen and never called
+    # LaunchFile(), so a SNES/GB/Mega Drive file was handed to the PSP loader.
+    # Every launch path now calls this one function instead of constructing an
+    # EmuScreen directly.
+    helper = (
+        "// SPHYNX: the single choke point for \"this file is not a PSP game\".\n"
+        "//\n"
+        "// Returns true when the file was handed to the Sphynx player screen, false\n"
+        "// when the caller must keep its normal PSP flow. It is called from every\n"
+        "// place that can start a game: LaunchFile(), GameScreen::OnPlay(), the\n"
+        "// boot-from-intent paths in MiscScreens.cpp / NativeApp.cpp, and as a last\n"
+        "// line of defence from EmuScreen::update().\n"
+        "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {\n"
+        "\t// Local covers plain files and Android content:// URIs alike: a game\n"
+        "\t// picked through the Storage Access Framework is a CONTENT_URI, and a\n"
+        "\t// check for PathType::NATIVE silently skipped every one of those.\n"
+        "\tif (!path.IsLocalType())\n"
+        "\t\treturn false;\n"
+        "\tconst std::string sphynxPath = path.ToString();\n"
+        "\tif (sphynx_ui_is_external(sphynxPath.c_str()) != 1)\n"
+        "\t\treturn false;\n"
+        "#if PPSSPP_PLATFORM(ANDROID)\n"
+        "\t// The player screen is Java-side: ask the app shell to open it.\n"
+        "\tSphynx_SendCommandToJava(\"sphynx_launch\", sphynxPath.c_str());\n"
+        "\t(void)screenManager;\n"
+        "\treturn true;\n"
+        "#else\n"
+        "\t// Desktop builds ship no player screen: let the caller do what it always\n"
+        "\t// did instead of swallowing the request.\n"
+        "\t(void)screenManager;\n"
+        "\treturn false;\n"
+        "#endif\n"
+        "}\n\n")
     head = "bool LaunchFile(ScreenManager *screenManager, const Path &path) {"
+    if "bool SphynxRouteExternal(ScreenManager *screenManager" in s:
+        print("  == MainScreen: routing helper already present")
+    elif head in s:
+        s = s.replace(head, helper + head, 1)
+        print("  ok MainScreen: SphynxRouteExternal() added")
+    else:
+        print("  !! MainScreen: LaunchFile anchor not found")
+
+    # (c) LaunchFile body: always the same three lines ------------------------
     body_marker = "\t// Depending on the file type, we don't want to launch EmuScreen at all."
-    block = ("\n\t// SPHYNX: hand non-PSP content to the Sphynx player screen. PSP files fall\n"
-             "\t// straight through to the original code below, unchanged.\n"
-             "\t// On Android a game picked through the Storage Access Framework arrives as\n"
-             "\t// a CONTENT_URI, not a NATIVE path: both are local, both must route.\n"
-             "\tif (path.IsLocalType()) {\n"
-             "\t\tconst std::string nativePath = path.ToString();\n"
-             "\t\tif (sphynx_ui_is_external(nativePath.c_str()) == 1) {\n"
-             "#if PPSSPP_PLATFORM(ANDROID)\n"
-             "\t\t\t// The player screen is Java-side; ask the app shell to open it.\n"
-             "\t\t\tSphynx_SendCommandToJava(\"sphynx_launch\", nativePath.c_str());\n"
-             "\t\t\treturn true;\n"
-             "#else\n"
-             "\t\t\t// Desktop builds ship no player screen: fall through so the user gets\n"
-             "\t\t\t// PPSSPP's own handling instead of silence.\n"
-             "#endif\n"
-             "\t\t}\n"
-             "\t}\n\n")
+    route_call = ("\n\t// SPHYNX: hand non-PSP content to the Sphynx player screen. PSP files fall\n"
+                  "\t// straight through to the original code below, unchanged.\n"
+                  "\tif (SphynxRouteExternal(screenManager, path))\n"
+                  "\t\treturn true;\n\n")
     if head in s and body_marker in s:
         i = s.index(head) + len(head)
         j = s.index(body_marker, i)
-        current = s[i:j]
-        section = current.replace(block, "\n")
-        # Rebuild cleanly: keep any user edits? No — this region is ours alone.
-        if "sphynx_ui_is_external" in section or "SPHYNX:" in section:
-            if current != block:
-                s = s[:i] + block + s[j:]
-                print("  ok MainScreen: launch routing normalised")
-            else:
-                print("  == MainScreen: launch routing already patched")
-        else:
-            s = s[:i] + block + s[j:]
-            print("  ok MainScreen: LaunchFile routes external systems to Sphynx")
+        s = s[:i] + route_call + s[j:]
+        print("  ok MainScreen: LaunchFile routes external systems to Sphynx")
     else:
-        print("  !! MainScreen: LaunchFile anchor not found")
+        print("  !! MainScreen: LaunchFile body anchor not found")
 
     # include for the C bridge
     if "sphynx_ui_api.h" not in s:
@@ -114,6 +133,215 @@ def patch_mainscreen(repo: Path) -> None:
             print("  !! MainScreen: include anchor not found")
 
     _write(f, s)
+
+
+def patch_mainscreen_header(repo: Path) -> None:
+    """Declare the routing helper next to LaunchFile()."""
+    f = repo / "UI" / "MainScreen.h"
+    s = _read(f)
+    if "SphynxRouteExternal" in s:
+        print("  == MainScreen.h: routing helper already declared")
+        return
+    anchor = "bool LaunchFile(ScreenManager *screenManager, const Path &path);"
+    if anchor not in s:
+        print("  !! MainScreen.h: LaunchFile declaration not found")
+        return
+    decl = (anchor + "\n\n"
+            "// SPHYNX: true when the file belongs to an external system and the player\n"
+            "// screen took over; false when the caller must run its normal PSP flow.\n"
+            "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path);")
+    s = s.replace(anchor, decl, 1)
+    _write(f, s)
+    print("  ok MainScreen.h: SphynxRouteExternal() declared")
+
+
+def patch_gamescreen(repo: Path) -> None:
+    """GameScreen::OnPlay is the path a tap in the game grid actually takes."""
+    f = repo / "UI" / "GameScreen.cpp"
+    if not f.exists():
+        print("  !! UI/GameScreen.cpp missing")
+        return
+    s = _read(f)
+    old = ("UI::EventReturn GameScreen::OnPlay(UI::EventParams &e) {\n"
+           "\tscreenManager()->switchScreen(new EmuScreen(gamePath_));")
+    new = ("UI::EventReturn GameScreen::OnPlay(UI::EventParams &e) {\n"
+           "\t// SPHYNX: a non-PSP game must never be booted by the PSP core. This is the\n"
+           "\t// exact path taken when a game is tapped in the grid, and it never went\n"
+           "\t// through LaunchFile() — the reason every external title used to fail with\n"
+           "\t// \"Failed initializing CPU or memory\".\n"
+           "\tif (SphynxRouteExternal(screenManager(), gamePath_))\n"
+           "\t\treturn UI::EVENT_DONE;\n"
+           "\tscreenManager()->switchScreen(new EmuScreen(gamePath_));")
+    if "SphynxRouteExternal" in s:
+        print("  == GameScreen: already routed")
+    elif old in s:
+        s = s.replace(old, new, 1)
+        print("  ok GameScreen: OnPlay routes external systems to Sphynx")
+    else:
+        print("  !! GameScreen: OnPlay anchor not found")
+    if '#include "UI/MainScreen.h"' not in s:
+        anchor = '#include "UI/EmuScreen.h"'
+        if anchor in s:
+            s = s.replace(anchor, anchor + '\n#include "UI/MainScreen.h"   // SPHYNX: SphynxRouteExternal()', 1)
+    _write(f, s)
+
+
+def patch_miscscreens(repo: Path) -> None:
+    """Boot-from-intent and the post-logo screen also start a game directly."""
+    f = repo / "UI" / "MiscScreens.cpp"
+    if not f.exists():
+        print("  !! UI/MiscScreens.cpp missing")
+        return
+    s = _read(f)
+    pairs = [
+        ("\t\t\tif (!gamePath.empty()) {\n"
+         "\t\t\t\tscreenManager()->switchScreen(new EmuScreen(gamePath));",
+         "\t\t\tif (!gamePath.empty()) {\n"
+         "\t\t\t\t// SPHYNX: never hand a non-PSP file to the PSP core.\n"
+         "\t\t\t\tif (!SphynxRouteExternal(screenManager(), gamePath))\n"
+         "\t\t\t\t\tscreenManager()->switchScreen(new EmuScreen(gamePath));"),
+        ("\t\t\tif (boot_filename.size()) {\n"
+         "\t\t\t\tscreenManager()->switchScreen(new EmuScreen(gamePath));",
+         "\t\t\tif (boot_filename.size()) {\n"
+         "\t\t\t\t// SPHYNX: a game opened from another app can be an external one.\n"
+         "\t\t\t\tif (!SphynxRouteExternal(screenManager(), gamePath))\n"
+         "\t\t\t\t\tscreenManager()->switchScreen(new EmuScreen(gamePath));"),
+        ("\tif (message == UIMessage::REQUEST_GAME_BOOT && screenManager()->topScreen() == this) {\n"
+         "\t\tscreenManager()->switchScreen(new EmuScreen(Path(value)));",
+         "\tif (message == UIMessage::REQUEST_GAME_BOOT && screenManager()->topScreen() == this) {\n"
+         "\t\t// SPHYNX: same guard for the \"boot this file now\" message.\n"
+         "\t\tconst Path sphynxBootPath(value);\n"
+         "\t\tif (!SphynxRouteExternal(screenManager(), sphynxBootPath))\n"
+         "\t\t\tscreenManager()->switchScreen(new EmuScreen(sphynxBootPath));"),
+    ]
+    changed = False
+    for old, new in pairs:
+        if new in s:
+            continue
+        if old in s:
+            s = s.replace(old, new, 1)
+            changed = True
+        else:
+            print("  !! MiscScreens: anchor not found\n" + old.replace("\n", " | "))
+    if changed:
+        _write(f, s)
+        print("  ok MiscScreens: every boot path routed through SphynxRouteExternal")
+    else:
+        print("  == MiscScreens: already routed")
+    if "SphynxRouteExternal" in s and '#include "UI/MainScreen.h"' not in s:
+        anchor = '#include "Core/Config.h"'
+        if anchor in s:
+            s = s.replace(anchor, anchor + '\n#include "UI/MainScreen.h"', 1)
+            _write(f, s)
+
+
+def patch_nativeapp(repo: Path) -> None:
+    """Startup: create the BIOS tree, and route a game opened from outside."""
+    f = repo / "UI" / "NativeApp.cpp"
+    if not f.exists():
+        print("  !! UI/NativeApp.cpp missing")
+        return
+    s = _read(f)
+    changed = False
+
+    # (a) the BIOS tree, created the moment the app starts
+    bios_block = (
+        "\t// SPHYNX: build PSP/SYSTEMS_BIOS — one folder per system that uses a BIOS\n"
+        "\t// (12 mandatory + 4 recommended) with a README naming the exact files, and\n"
+        "\t// copy anything already sitting in PSP/SYSTEM into the matching folder.\n"
+        "\t// Only a real filesystem memstick folder can hold it; a Storage-Access\n"
+        "\t// Framework folder is handled by the Java side instead.\n"
+        "\tif (g_Config.memStickDirectory.Type() == PathType::NATIVE &&\n"
+        "\t    !g_Config.memStickDirectory.empty()) {\n"
+        "\t\tsphynx_ui_ensure_bios_tree(g_Config.memStickDirectory.ToString().c_str());\n"
+        "\t}\n\n")
+    anchor = ('\tDEBUG_LOG(Log::System, "ScreenManager!");\n'
+              '\tg_screenManager = new ScreenManager();')
+    if "sphynx_ui_ensure_bios_tree" in s:
+        print("  == NativeApp: BIOS tree already created at startup")
+    elif anchor in s:
+        s = s.replace(anchor, bios_block + anchor, 1)
+        changed = True
+        print("  ok NativeApp: BIOS tree created at startup")
+    else:
+        print("  !! NativeApp: ScreenManager anchor not found")
+
+    # (b) a game opened from another app
+    old = ("\t} else if (skipLogo) {\n"
+           "\t\tg_screenManager->switchScreen(new EmuScreen(boot_filename));")
+    new = ("\t} else if (skipLogo) {\n"
+           "\t\t// SPHYNX: \"open with\" can hand us a file of any system.\n"
+           "\t\tif (!SphynxRouteExternal(g_screenManager, boot_filename))\n"
+           "\t\t\tg_screenManager->switchScreen(new EmuScreen(boot_filename));")
+    if "SphynxRouteExternal(g_screenManager, boot_filename)" in s:
+        print("  == NativeApp: boot path already routed")
+    elif old in s:
+        s = s.replace(old, new, 1)
+        changed = True
+        print("  ok NativeApp: boot-from-intent routed through Sphynx")
+    else:
+        print("  !! NativeApp: skipLogo anchor not found")
+
+    if "sphynx_ui_api.h" not in s:
+        anchor2 = '#include "Core/Config.h"'
+        if anchor2 in s:
+            s = s.replace(anchor2, anchor2 + '\n// SPHYNX: BIOS tree + routing bridge.\n#include "sphynx_ui_api.h"', 1)
+            changed = True
+    if '#include "UI/MainScreen.h"' not in s:
+        anchor3 = '#include "UI/EmuScreen.h"'
+        if anchor3 in s:
+            s = s.replace(anchor3, anchor3 + '\n#include "UI/MainScreen.h"   // SPHYNX: SphynxRouteExternal()', 1)
+            changed = True
+
+    if changed:
+        _write(f, s)
+
+
+def patch_emuscreen(repo: Path) -> None:
+    """Last line of defence: an EmuScreen created by a path we did not patch."""
+    h = repo / "UI" / "EmuScreen.h"
+    s = _read(h)
+    if "sphynxRouted_" in s:
+        print("  == EmuScreen.h: guard flag already present")
+    else:
+        anchor = "\tbool bootPending_ = true;\n\tPath gamePath_;"
+        if anchor in s:
+            new = ("\tbool bootPending_ = true;\n"
+                   "\t// SPHYNX: set once this screen has checked whether the file is really\n"
+                   "\t// a PSP game, so the check runs exactly once per screen.\n"
+                   "\tbool sphynxRouted_ = false;\n"
+                   "\tPath gamePath_;")
+            s = s.replace(anchor, new, 1)
+            _write(h, s)
+            print("  ok EmuScreen.h: guard flag added")
+        else:
+            print("  !! EmuScreen.h: bootPending_ anchor not found")
+
+    f = repo / "UI" / "EmuScreen.cpp"
+    s = _read(f)
+    if "SphynxRouteExternal(screenManager(), gamePath_)" in s:
+        print("  == EmuScreen.cpp: catch-all already present")
+        return
+    anchor = ("void EmuScreen::update() {\n"
+              "\tusing namespace UI;\n")
+    guard = (anchor + "\n"
+             "\t// SPHYNX: last line of defence. Every launch path routes through\n"
+             "\t// SphynxRouteExternal() before this screen is even created; this block\n"
+             "\t// makes sure that a path nobody patched still ends up in the player\n"
+             "\t// instead of failing with \"Failed initializing CPU or memory\".\n"
+             "\tif (!sphynxRouted_) {\n"
+             "\t\tsphynxRouted_ = true;\n"
+             "\t\tif (SphynxRouteExternal(screenManager(), gamePath_)) {\n"
+             "\t\t\tscreenManager()->switchScreen(new MainScreen());\n"
+             "\t\t\treturn;\n"
+             "\t\t}\n"
+             "\t}\n")
+    if anchor in s:
+        s = s.replace(anchor, guard, 1)
+        _write(f, s)
+        print("  ok EmuScreen.cpp: catch-all routing added")
+    else:
+        print("  !! EmuScreen.cpp: update() anchor not found")
 
 
 def patch_gameinfocache(repo: Path) -> None:
@@ -251,7 +479,12 @@ def patch_nativeactivity(repo: Path) -> None:
                 "\t\t// a context so a content:// game file can be copied for the cores.\n"
                 "\t\torg.sphynx.emulator.SphynxExtCore.attachContext(getApplicationContext());\n"
                 "\t\torg.sphynx.emulator.SphynxExtCore.setPaths(\n"
-                "\t\t\t\tgetApplicationInfo().nativeLibraryDir, getFilesDir().getAbsolutePath());")
+                "\t\t\t\tgetApplicationInfo().nativeLibraryDir,\n"
+                "\t\t\t\torg.sphynx.emulator.SphynxExtCore.systemDir(this),\n"
+                "\t\t\t\torg.sphynx.emulator.SphynxExtCore.saveDir(this));\n"
+                "\t\t// SPHYNX: create PSP/SYSTEMS_BIOS now, so the folders are there\n"
+                "\t\t// the first time the user opens the app.\n"
+                "\t\torg.sphynx.emulator.SphynxExtCore.ensureBiosTree(this);")
         if anchor2 in s:
             s = s.replace(anchor2, init, 1)
             changed = True
@@ -261,6 +494,24 @@ def patch_nativeactivity(repo: Path) -> None:
 
     if changed:
         _write(f, s)
+
+    # (c) the BIOS tree must exist from the very first launch. Added as its own
+    # idempotent step so a tree patched by an earlier revision still gets it.
+    s = _read(f)
+    if "SphynxExtCore.ensureBiosTree" not in s:
+        anchor = ("\t\torg.sphynx.emulator.SphynxExtCore.setPaths(getApplicationInfo().nativeLibraryDir,\n"
+                  "\t\t\t\torg.sphynx.emulator.SphynxExtCore.saveDir(this));")
+        if anchor in s:
+            s = s.replace(anchor, anchor + (
+                "\n\t\t// SPHYNX: create PSP/SYSTEMS_BIOS at start-up, so the BIOS folders are\n"
+                "\t\t// there the first time the user opens the app — not after a game fails.\n"
+                "\t\torg.sphynx.emulator.SphynxExtCore.ensureBiosTree(this);"), 1)
+            _write(f, s)
+            print("  ok NativeActivity: BIOS tree created at start-up")
+        else:
+            print("  !! NativeActivity: setPaths anchor not found for the BIOS tree")
+    else:
+        print("  == NativeActivity: BIOS tree already created at start-up")
 
 
 def patch_strings(repo: Path) -> None:
@@ -384,6 +635,11 @@ extern "C" void Sphynx_SendCommandToJava(const char *command, const char *param)
 
 def apply(repo: Path, overlay_dir: Path) -> None:
     patch_mainscreen(repo)
+    patch_mainscreen_header(repo)
+    patch_gamescreen(repo)
+    patch_miscscreens(repo)
+    patch_nativeapp(repo)
+    patch_emuscreen(repo)
     patch_app_android(repo)
     patch_gameinfocache(repo)
     patch_manifest(repo)

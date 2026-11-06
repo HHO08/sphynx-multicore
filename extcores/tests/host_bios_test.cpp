@@ -1,0 +1,308 @@
+// ============================================================================
+//  Sphynx — extcores/tests/host_bios_test.cpp
+//
+//  Tests for the two things this stage adds outside the player itself:
+//
+//    1. PSP/SYSTEMS_BIOS  — the folder tree the user asked for:
+//         * exactly 16 folders (12 mandatory + 4 recommended, never 35)
+//         * created automatically, with a README naming the exact files
+//         * a user's own files are never overwritten or deleted
+//         * BIOS already in PSP/SYSTEM is adopted into the matching folder
+//         * "missing" reports the truth, including "one of several regions"
+//         * systems without a BIOS get no folder at all
+//    2. Save states on disk — round trip, wrong-core refusal, corruption
+//       refusal, and the path layout.
+//
+//  Everything here runs the same object code the APK ships.
+//
+//  SPDX-License-Identifier: GPL-2.0-or-later
+// ============================================================================
+#include "sphynx_extcore.h"
+#include "sphynx_ui_api.h"
+#include "bios_layout.h"
+#include "state_file.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace {
+
+int g_failures = 0;
+int g_checks = 0;
+std::string g_root;
+
+void Check(bool ok, const char *what) {
+	++g_checks;
+	if (!ok) {
+		++g_failures;
+		std::printf("  FAIL  %s\n", what);
+	} else {
+		std::printf("  ok    %s\n", what);
+	}
+}
+
+bool Exists(const std::string &p) {
+	struct stat st;
+	return ::stat(p.c_str(), &st) == 0;
+}
+
+bool IsDir(const std::string &p) {
+	struct stat st;
+	return ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+void MkDirs(const std::string &p) {
+	std::string cur;
+	for (size_t i = 0; i < p.size(); ++i) {
+		cur += p[i];
+		if (p[i] == '/' && cur.size() > 1) ::mkdir(cur.c_str(), 0777);
+	}
+	::mkdir(p.c_str(), 0777);
+}
+
+void WriteFile(const std::string &path, const std::string &text) {
+	FILE *f = std::fopen(path.c_str(), "wb");
+	if (!f) return;
+	std::fwrite(text.data(), 1, text.size(), f);
+	std::fclose(f);
+}
+
+std::string ReadFile(const std::string &path) {
+	FILE *f = std::fopen(path.c_str(), "rb");
+	if (!f) return std::string();
+	std::string out;
+	char buf[4096];
+	size_t n;
+	while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+	std::fclose(f);
+	return out;
+}
+
+// ---------------------------------------------------------------------------
+//  1. The folder tree
+// ---------------------------------------------------------------------------
+void TestRegistry() {
+	std::printf("\n[BIOS registry]\n");
+	Check(sphynx::BiosSystemCount() == 16, "exactly 16 systems have a BIOS folder");
+	Check(sphynx::MandatoryBiosCount() == 12, "12 of them cannot run without a BIOS");
+	Check(sphynx::RecommendedBiosCount() == 4, "4 of them only work better with one");
+
+	// No duplicates: two systems sharing a folder would make one of them read
+	// the other's files.
+	bool unique = true;
+	for (int i = 0; i < sphynx::BiosSystemCount(); ++i) {
+		for (int j = i + 1; j < sphynx::BiosSystemCount(); ++j) {
+			if (std::strcmp(sphynx::AllBiosSystems()[i].folder, sphynx::AllBiosSystems()[j].folder) == 0)
+				unique = false;
+		}
+	}
+	Check(unique, "every folder name is unique");
+
+	// Every key must exist in the system registry, otherwise the player would
+	// look for a folder it can never be asked about.
+	bool keys_known = true;
+	for (int i = 0; i < sphynx::BiosSystemCount(); ++i) {
+		const sphynx::BiosSystem &s = sphynx::AllBiosSystems()[i];
+		const sphynx::SystemInfo *info = sphynx::FindSystemByKey(s.system_key);
+		if (!info || !info->bios_hint) keys_known = false;
+	}
+	Check(keys_known, "every BIOS folder belongs to a real system that declares a BIOS");
+
+	// Systems that need nothing must have no folder: the request was explicit
+	// about not creating folders for the other 19 systems.
+	Check(sphynx::FindBiosSystem("nes") == nullptr, "NES has no BIOS folder");
+	Check(sphynx::FindBiosSystem("snes") == nullptr, "SNES has no BIOS folder");
+	Check(sphynx::FindBiosSystem("gba") == nullptr, "GBA has no BIOS folder");
+	Check(sphynx::FindBiosSystem("genesis") == nullptr, "Genesis has no BIOS folder");
+	Check(sphynx::FindBiosSystem("psp") == nullptr, "PSP has no BIOS folder");
+	Check(sphynx::FindBiosSystem("psx") != nullptr, "PlayStation has a BIOS folder");
+	Check(sphynx::FindBiosSystem("saturn") != nullptr, "Saturn has a BIOS folder");
+	Check(sphynx::FindBiosSystem("dreamcast") != nullptr, "Dreamcast has a (recommended) folder");
+}
+
+void TestTreeCreation() {
+	std::printf("\n[BIOS tree is created]\n");
+	const std::string memstick = g_root + "/memstick";
+	MkDirs(memstick);
+
+	const std::string root = sphynx::BiosRoot(memstick);
+	Check(root == memstick + "/SYSTEMS_BIOS", "the tree lives in PSP/SYSTEMS_BIOS");
+
+	std::string report;
+	const int made = sphynx::EnsureBiosTree(memstick, &report);
+	Check(made == 16, "the first run creates all 16 folders");
+	Check(IsDir(root), "the SYSTEMS_BIOS folder exists");
+	Check(Exists(root + "/00-READ-ME-FIRST.txt"), "a top level README is written");
+
+	// Every system folder must exist with its own README.
+	bool all_dirs = true, all_readme = true;
+	for (int i = 0; i < sphynx::BiosSystemCount(); ++i) {
+		const sphynx::BiosSystem &s = sphynx::AllBiosSystems()[i];
+		const std::string dir = root + "/" + s.folder;
+		if (!IsDir(dir)) all_dirs = false;
+		if (!Exists(dir + "/README.txt")) all_readme = false;
+	}
+	Check(all_dirs, "one folder per BIOS system");
+	Check(all_readme, "each folder explains which files it wants");
+
+	// The README must actually name the files, otherwise it is decoration.
+	const std::string saturn_readme = ReadFile(root + "/02-Sega Saturn/README.txt");
+	Check(saturn_readme.find("sega_101.bin") != std::string::npos &&
+	          saturn_readme.find("mpr-17933.bin") != std::string::npos,
+	      "the Saturn README names both region BIOS files");
+	Check(saturn_readme.find("REQUIRED") != std::string::npos, "and says the BIOS is required");
+	const std::string dc_readme = ReadFile(root + "/13-Dreamcast/README.txt");
+	Check(dc_readme.find("OPTIONAL") != std::string::npos, "Dreamcast is marked optional");
+
+	// Running it again must be a no-op: the app does this at every start.
+	const int again = sphynx::EnsureBiosTree(memstick, &report);
+	Check(again == 0, "a second run creates nothing (idempotent)");
+
+	// A user note must survive.
+	WriteFile(root + "/01-PlayStation/README.txt", "my own notes\n");
+	sphynx::EnsureBiosTree(memstick, &report);
+	Check(ReadFile(root + "/01-PlayStation/README.txt") == "my own notes\n",
+	      "a README the user edited is never overwritten");
+}
+
+void TestMissingAndAdoption() {
+	std::printf("\n[BIOS detection + adoption from PSP/SYSTEM]\n");
+	const std::string memstick = g_root + "/memstick";
+
+	// Empty folder: everything the system expects is reported as missing.
+	const std::string missing = sphynx::MissingBiosFiles(memstick, "psx");
+	Check(missing.find("scph5501.bin") != std::string::npos, "an empty PSX folder reports scph5501.bin");
+	Check(sphynx::BiosStatusForSystem(memstick, "psx").rfind("missing", 0) == 0,
+	      "status starts with 'missing'");
+
+	// One region file is enough: the others must stop being reported.
+	WriteFile(sphynx::BiosDirForSystem(memstick, "psx") + "/scph5501.bin", "FAKEBIOS");
+	Check(sphynx::MissingBiosFiles(memstick, "psx").empty(),
+	      "one PSX BIOS file is enough (regions are alternatives)");
+	Check(sphynx::BiosStatusForSystem(memstick, "psx") == "complete", "status becomes complete");
+
+	// A system without a BIOS answers honestly.
+	Check(sphynx::BiosStatusForSystem(memstick, "nes") == "no BIOS needed",
+	      "a system without BIOS says so instead of complaining");
+
+	// Adoption: files dropped in the old PSP/SYSTEM folder are copied in.
+	MkDirs(memstick + "/SYSTEM");
+	WriteFile(memstick + "/SYSTEM/sega_101.bin", "SATURNBIOS");
+	WriteFile(memstick + "/SYSTEM/coleco.rom", "COLECO");
+	std::string report;
+	const int adopted = sphynx::AdoptLegacyBios(memstick, &report);
+	Check(adopted == 2, "two BIOS files were adopted from PSP/SYSTEM");
+	Check(Exists(sphynx::BiosDirForSystem(memstick, "saturn") + "/sega_101.bin"),
+	      "the Saturn BIOS arrived in its own folder");
+	Check(Exists(sphynx::BiosDirForSystem(memstick, "coleco") + "/coleco.rom"),
+	      "the ColecoVision BIOS arrived in its own folder");
+	Check(Exists(memstick + "/SYSTEM/sega_101.bin"), "the original file is left where it was (copy, not move)");
+	Check(sphynx::AdoptLegacyBios(memstick, &report) == 0, "adoption does not run twice");
+
+	// An adopted file makes the system report complete.
+	Check(sphynx::BiosStatusForSystem(memstick, "saturn") == "complete",
+	      "adopting a BIOS makes the system complete");
+}
+
+// ---------------------------------------------------------------------------
+//  2. The C surface PPSSPP's UI and Java use
+// ---------------------------------------------------------------------------
+void TestUiApi() {
+	std::printf("\n[UI/Java bridge]\n");
+	const std::string memstick = g_root + "/memstick";
+	sphynx_ui_set_memstick(memstick.c_str());
+	Check(std::string(sphynx_ui_bios_root()) == memstick + "/SYSTEMS_BIOS",
+	      "sphynx_ui_bios_root() returns PSP/SYSTEMS_BIOS");
+
+	const int made = sphynx_ui_ensure_bios_tree(memstick.c_str());
+	Check(made >= 0, "sphynx_ui_ensure_bios_tree() succeeds");
+
+	char *psx = sphynx_ui_bios_dir_for_system("psx");
+	Check(psx && std::string(psx) == memstick + "/SYSTEMS_BIOS/01-PlayStation",
+	      "the PlayStation folder is handed to the core as its system directory");
+	sphynx_ui_free(psx);
+
+	char *nes = sphynx_ui_bios_dir_for_system("nes");
+	Check(nes == nullptr, "a system without BIOS gets no folder (the caller falls back to PSP/SYSTEM)");
+	sphynx_ui_free(nes);
+
+	char *missing = sphynx_ui_bios_missing("3do");
+	Check(missing && std::strstr(missing, "panafz10.bin") != nullptr,
+	      "the bridge reports the 3DO BIOS as missing");
+	sphynx_ui_free(missing);
+
+	Check(std::string(sphynx_ui_bios_status("msx")).rfind("missing", 0) == 0,
+	      "MSX reports its (optional) files as missing until they exist");
+}
+
+// ---------------------------------------------------------------------------
+//  3. Save states on disk
+// ---------------------------------------------------------------------------
+void TestSaveStates() {
+	std::printf("\n[save states]\n");
+	const std::string save_dir = g_root + "/save";
+
+	const std::string path = sphynx::StateFilePath(save_dir, "Ys III (USA)", 2);
+	Check(path == save_dir + "/states/Ys III (USA).slot2.sav", "the slot path has the expected shape");
+
+	std::vector<uint8_t> snapshot;
+	for (int i = 0; i < 4096; ++i) snapshot.push_back(uint8_t(i * 7));
+	std::string err;
+	Check(sphynx::WriteStateFile(path, "snes9x", snapshot, &err), "a state is written");
+
+	std::vector<uint8_t> back;
+	Check(sphynx::ReadStateFile(path, "snes9x", &back, &err), "the same state is read back");
+	Check(back == snapshot, "the payload survives the round trip byte for byte");
+
+	// A Game Boy state must not be loadable while a SNES game runs.
+	Check(!sphynx::ReadStateFile(path, "gambatte", &back, &err), "a state from another system is refused");
+	Check(err.find("another system") != std::string::npos, "and the reason is readable");
+
+	// Corruption must be caught, not loaded.
+	std::string blob = ReadFile(path);
+	blob[blob.size() - 10] = char(uint8_t(blob[blob.size() - 10]) ^ 0xFF);
+	WriteFile(path, blob);
+	Check(!sphynx::ReadStateFile(path, "snes9x", &back, &err), "a corrupted state is refused");
+	Check(err.find("checksum") != std::string::npos, "with a checksum message");
+
+	// An empty slot must say so, in words the player screen can show.
+	Check(!sphynx::ReadStateFile(sphynx::StateFilePath(save_dir, "other", 0), "snes9x", &back, &err),
+	      "an empty slot refuses to load");
+	Check(err.find("no save state") != std::string::npos, "and explains that the slot is empty");
+	Check(!sphynx::StateFileExists(sphynx::StateFilePath(save_dir, "other", 0)), "hasState() reports it empty");
+	Check(sphynx::StateFileExists(path), "hasState() reports the written slot as used");
+
+	// An empty snapshot must never be written.
+	Check(!sphynx::WriteStateFile(path, "snes9x", {}, &err), "an empty snapshot is rejected");
+}
+
+}  // namespace
+
+int main() {
+	char temp[] = "/tmp/sphynx_bios_XXXXXX";
+	const char *dir = ::mkdtemp(temp);
+	if (!dir) {
+		std::printf("cannot create a temp directory\n");
+		return 2;
+	}
+	g_root = dir;
+	MkDirs(g_root + "/save");
+
+	std::printf("Sphynx BIOS/state test (%s)\nworkspace: %s\n", sphynx::BuildId(), g_root.c_str());
+
+	TestRegistry();
+	TestTreeCreation();
+	TestMissingAndAdoption();
+	TestUiApi();
+	TestSaveStates();
+
+	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
+	            g_failures ? "FAILED" : "all good");
+	return g_failures ? 1 : 0;
+}

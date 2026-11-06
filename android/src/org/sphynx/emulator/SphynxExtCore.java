@@ -3,14 +3,17 @@
 //
 //  Java side of the external-core host.
 //
-//  Two jobs, both defensive:
+//  Three jobs, all defensive:
 //    1. Native bridge. If the library is missing, every call degrades to a safe
 //       value so the app behaves exactly like upstream PPSSPP.
 //    2. Resolving Android document URIs. On modern Android PPSSPP browses the
 //       game folder through the Storage Access Framework, so what the native
 //       side receives is a content:// URI, not a file path. Emulator cores use
-//       fopen(), so a URI copy is made into the app cache the first time it is
-//       needed. This is the fix for "every game fails to start".
+//       fopen(), so a URI is turned into a real file first.
+//    3. The BIOS tree: PSP/SYSTEMS_BIOS, one folder per system that uses BIOS.
+//       Every core is handed its own folder as the libretro system directory,
+//       so the user can drop files in, swap them or delete them at any time and
+//       the next launch reads whatever is there.
 //
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
@@ -20,6 +23,7 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Environment;
 import android.provider.OpenableColumns;
 import android.util.Log;
 
@@ -59,18 +63,56 @@ public final class SphynxExtCore {
 		if (isAvailable()) nativeSetPaths(nativeLibraryDir, systemDir, saveDir);
 	}
 
+	// ------------------------------------------------------------------------
+	//  Folders
+	// ------------------------------------------------------------------------
+
 	/**
-	 * Where the cores look for BIOS files. PPSSPP's own PSP/SYSTEM folder wins
-	 * when it exists, so a user who already keeps BIOS files for PPSSPP finds
-	 * them here too instead of being told to copy them again.
+	 * PPSSPP's own memory-stick folder (".../PSP"). The native layer learns the
+	 * real one from PPSSPP at startup, so this always matches what PPSSPP uses
+	 * — including a memstick folder the user moved to the SD card.
 	 */
-	public static String systemDir(Context context) {
-		File psp = new File(android.os.Environment.getExternalStorageDirectory(), "PSP/SYSTEM");
+	public static String memstickDir(Context context) {
+		// 1. Authoritative: the native layer learned it from PPSSPP itself.
+		String root = isAvailable() ? nativeBiosRoot() : "";
+		if (root != null && !root.isEmpty()) {
+			File parent = new File(root).getParentFile();
+			if (parent != null) return parent.getAbsolutePath();
+		}
+		// 2. Before the native layer knows: look for the folder PPSSPP already
+		//    uses. Both layouts exist in the wild ("PSP" next to the storage
+		//    root, and "Android/media/PSP" on newer setups).
+		File external = Environment.getExternalStorageDirectory();
+		File[] candidates = {
+				new File(external, "PSP"),
+				new File(external, "Android/media/PSP"),
+				new File(context.getExternalFilesDir(null), "PSP"),
+		};
+		for (File candidate : candidates) {
+			if (candidate == null) continue;
+			if (new File(candidate, "GAME").isDirectory() || new File(candidate, "SYSTEM").isDirectory()) {
+				return candidate.getAbsolutePath();
+			}
+		}
+		// 3. Nothing found: use the standard location and create it.
+		File psp = new File(external, "PSP");
+		if (!psp.isDirectory()) {
+			//noinspection ResultOfMethodCallIgnored
+			psp.mkdirs();
+		}
 		if (psp.isDirectory()) return psp.getAbsolutePath();
-		File fallback = new File(context.getFilesDir(), "sphynx/system");
+		File fallback = new File(context.getFilesDir(), "PSP");
 		//noinspection ResultOfMethodCallIgnored
 		fallback.mkdirs();
 		return fallback.getAbsolutePath();
+	}
+
+	/** Kept for compatibility: PPSSPP's traditional BIOS folder. */
+	public static String systemDir(Context context) {
+		File dir = new File(memstickDir(context), "SYSTEM");
+		//noinspection ResultOfMethodCallIgnored
+		dir.mkdirs();
+		return dir.getAbsolutePath();
 	}
 
 	/** Saves and battery RAM. App-private: always writable, never needs a grant. */
@@ -79,6 +121,54 @@ public final class SphynxExtCore {
 		//noinspection ResultOfMethodCallIgnored
 		dir.mkdirs();
 		return dir.getAbsolutePath();
+	}
+
+	// ------------------------------------------------------------------------
+	//  BIOS tree: PSP/SYSTEMS_BIOS
+	// ------------------------------------------------------------------------
+
+	/**
+	 * Creates PSP/SYSTEMS_BIOS with one folder per system that needs a BIOS
+	 * (the 12 mandatory ones and the 4 recommended ones), writes a README in
+	 * each, and copies any BIOS the user already keeps in PSP/SYSTEM into the
+	 * matching folder. Safe to call on every start: it never overwrites a file.
+	 */
+	public static void ensureBiosTree(Context context) {
+		if (!isAvailable()) return;
+		String memstick = memstickDir(context);
+		nativeSetMemstick(memstick);
+		int made = nativeEnsureBiosTree(memstick);
+		Log.i(TAG, "BIOS tree at " + nativeBiosRoot() + " (" + made + " new folders)");
+	}
+
+	public static String biosRoot() {
+		return isAvailable() ? nativeBiosRoot() : "";
+	}
+
+	/** Folder of one system, or "" when that system needs no BIOS at all. */
+	public static String biosDir(String systemKey) {
+		return isAvailable() ? nativeBiosDir(systemKey) : "";
+	}
+
+	/**
+	 * The libretro "system directory" for a system: its own BIOS folder when it
+	 * has one, PPSSPP's PSP/SYSTEM otherwise. Every core looks for its BIOS
+	 * exactly here.
+	 */
+	public static String systemDirForSystem(Context context, String systemKey) {
+		String dir = biosDir(systemKey);
+		if (dir != null && !dir.isEmpty()) return dir;
+		return systemDir(context);
+	}
+
+	/** Expected BIOS files that are missing ("" = complete or none needed). */
+	public static String missingBios(String systemKey) {
+		return isAvailable() ? nativeBiosMissing(systemKey) : "";
+	}
+
+	/** "complete" / "missing x, y" / "no BIOS needed". */
+	public static String biosStatus(String systemKey) {
+		return isAvailable() ? nativeBiosStatus(systemKey) : "";
 	}
 
 	/** "" when the system needs no BIOS, otherwise the file name to look for. */
@@ -102,7 +192,7 @@ public final class SphynxExtCore {
 		return isAvailable() ? nativeDetect(path, head) : "psp";
 	}
 
-	/** "key|Display name;..." for files that several systems could claim. */
+	/** "key|Display name;...", for files that several systems could claim. */
 	public static String candidates(String path) {
 		return isAvailable() ? nativeCandidates(path) : "";
 	}
@@ -222,6 +312,12 @@ public final class SphynxExtCore {
 	}
 
 	private static native void nativeSetPaths(String nativeLibraryDir, String systemDir, String saveDir);
+	private static native void nativeSetMemstick(String memstickDir);
+	private static native int nativeEnsureBiosTree(String memstickDir);
+	private static native String nativeBiosRoot();
+	private static native String nativeBiosDir(String systemKey);
+	private static native String nativeBiosMissing(String systemKey);
+	private static native String nativeBiosStatus(String systemKey);
 	private static native String nativeBiosHint(String systemKey);
 	private static native String nativeBuildId();
 	private static native String nativeSelfCheck();

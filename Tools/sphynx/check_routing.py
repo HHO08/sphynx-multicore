@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+check_routing.py — guards the fix for "Failed initializing CPU or memory".
+
+The bug
+-------
+LaunchFile() was patched to send non-PSP games to the player screen, but the
+path a tap in the game grid actually takes is
+
+    MainScreen::OnGameSelected -> GameScreen -> GameScreen::OnPlay -> EmuScreen
+
+which never called LaunchFile(). Every SNES/GB/Mega Drive/Master System file
+was therefore handed to the PSP loader, which failed with
+"Failed initializing CPU or memory".
+
+This script fails the build if any `new EmuScreen(` can be reached without
+going through SphynxRouteExternal() first, so the same mistake cannot come
+back when PPSSPP is updated.
+
+Exit code 0 = every launch path is guarded.
+SPDX-License-Identifier: GPL-2.0-or-later
+"""
+
+import re
+import sys
+from pathlib import Path
+
+# Files where an unguarded `new EmuScreen(` is correct and must stay:
+#   MainScreen.cpp — LaunchFile() has already returned for external files
+#   Store.cpp      — the PPSSPP store only ever serves PSP content
+ALLOWED_UNGUARDED = {
+    "UI/MainScreen.cpp": "LaunchFile() returned early for external files",
+    "UI/Store.cpp": "the store only serves PSP games",
+}
+
+# Every file that must contain the guard call.
+REQUIRED_CALLERS = [
+    "UI/MainScreen.cpp",
+    "UI/GameScreen.cpp",
+    "UI/MiscScreens.cpp",
+    "UI/NativeApp.cpp",
+    "UI/EmuScreen.cpp",
+]
+
+GUARD = "SphynxRouteExternal"
+LOOKBACK = 8   # lines of context searched above a `new EmuScreen(`
+
+
+def main(root: str) -> int:
+    repo = Path(root).resolve()
+    problems = []
+
+    # 1. the guard exists, and is declared for every caller
+    main_screen = (repo / "UI" / "MainScreen.cpp").read_text(encoding="utf-8", errors="surrogateescape")
+    if "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {" not in main_screen:
+        problems.append("UI/MainScreen.cpp does not define SphynxRouteExternal()")
+    header = (repo / "UI" / "MainScreen.h").read_text(encoding="utf-8", errors="surrogateescape")
+    if "bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path);" not in header:
+        problems.append("UI/MainScreen.h does not declare SphynxRouteExternal()")
+
+    # The old bug in one line: a routing check that only accepts NATIVE paths.
+    # Match the code (not the comments explaining it).
+    guard_body = main_screen.split("bool SphynxRouteExternal")[1].split("\n}\n")[0]
+    if re.search(r"Type\(\)\s*==\s*PathType::NATIVE", guard_body):
+        problems.append("SphynxRouteExternal() checks PathType::NATIVE "
+                        "(content:// games would be skipped again)")
+    if "IsLocalType()" not in guard_body:
+        problems.append("SphynxRouteExternal() does not use Path::IsLocalType()")
+
+    # 2. every caller really calls it
+    for rel in REQUIRED_CALLERS:
+        f = repo / rel
+        if not f.exists():
+            problems.append(f"{rel} is missing")
+            continue
+        text = f.read_text(encoding="utf-8", errors="surrogateescape")
+        if GUARD not in text:
+            problems.append(f"{rel} never calls {GUARD}()")
+
+    # 3. no unguarded EmuScreen construction outside the allowlist
+    guarded_sites = 0
+    unguarded_sites = 0
+    for f in sorted((repo / "UI").glob("*.cpp")):
+        rel = "UI/" + f.name
+        lines = f.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+        for i, line in enumerate(lines):
+            if "new EmuScreen(" not in line:
+                continue
+            context = "\n".join(lines[max(0, i - LOOKBACK):i + 1])
+            if GUARD in context:
+                guarded_sites += 1
+                continue
+            if rel in ALLOWED_UNGUARDED:
+                print(f"  ok    {rel}:{i + 1} unguarded on purpose — {ALLOWED_UNGUARDED[rel]}")
+                continue
+            unguarded_sites += 1
+            problems.append(f"{rel}:{i + 1} creates an EmuScreen without {GUARD}() first")
+
+    print(f"  guarded EmuScreen sites: {guarded_sites}, unguarded: {unguarded_sites}")
+
+    # 4. the BIOS tree is built at start-up on both sides of the bridge
+    native_app = (repo / "UI" / "NativeApp.cpp").read_text(encoding="utf-8", errors="surrogateescape")
+    if "sphynx_ui_ensure_bios_tree" not in native_app:
+        problems.append("UI/NativeApp.cpp does not build PSP/SYSTEMS_BIOS at start-up")
+    activity = repo / "android" / "src" / "org" / "ppsspp" / "ppsspp" / "NativeActivity.java"
+    if not activity.exists() or "ensureBiosTree" not in activity.read_text(encoding="utf-8", errors="surrogateescape"):
+        problems.append("NativeActivity.java does not create the BIOS tree at start-up")
+
+    # 5. the player really offers Save state / Load state / Settings
+    player = repo / "android" / "src" / "org" / "sphynx" / "emulator" / "SphynxPlayerActivity.java"
+    if not player.exists():
+        problems.append("SphynxPlayerActivity.java is missing")
+    else:
+        text = player.read_text(encoding="utf-8", errors="surrogateescape")
+        for needed in ("\"Save state\"", "\"Load state\"", "\"Settings\"", "nativeSaveState", "nativeLoadState"):
+            if needed not in text:
+                problems.append(f"SphynxPlayerActivity.java lost {needed}")
+
+    if problems:
+        print("\nROUTING CHECK FAILED:")
+        for p in problems:
+            print("  - " + p)
+        return 1
+    print("routing check: every game launch path is guarded")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "."))

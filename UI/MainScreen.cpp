@@ -75,24 +75,40 @@
 
 bool MainScreen::showHomebrewTab = false;
 
+// SPHYNX: the single choke point for "this file is not a PSP game".
+//
+// Returns true when the file was handed to the Sphynx player screen, false
+// when the caller must keep its normal PSP flow. It is called from every
+// place that can start a game: LaunchFile(), GameScreen::OnPlay(), the
+// boot-from-intent paths in MiscScreens.cpp / NativeApp.cpp, and as a last
+// line of defence from EmuScreen::update().
+bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {
+	// Local covers plain files and Android content:// URIs alike: a game
+	// picked through the Storage Access Framework is a CONTENT_URI, and a
+	// check for PathType::NATIVE silently skipped every one of those.
+	if (!path.IsLocalType())
+		return false;
+	const std::string sphynxPath = path.ToString();
+	if (sphynx_ui_is_external(sphynxPath.c_str()) != 1)
+		return false;
+#if PPSSPP_PLATFORM(ANDROID)
+	// The player screen is Java-side: ask the app shell to open it.
+	Sphynx_SendCommandToJava("sphynx_launch", sphynxPath.c_str());
+	(void)screenManager;
+	return true;
+#else
+	// Desktop builds ship no player screen: let the caller do what it always
+	// did instead of swallowing the request.
+	(void)screenManager;
+	return false;
+#endif
+}
+
 bool LaunchFile(ScreenManager *screenManager, const Path &path) {
 	// SPHYNX: hand non-PSP content to the Sphynx player screen. PSP files fall
 	// straight through to the original code below, unchanged.
-	// On Android a game picked through the Storage Access Framework arrives as
-	// a CONTENT_URI, not a NATIVE path: both are local, both must route.
-	if (path.IsLocalType()) {
-		const std::string nativePath = path.ToString();
-		if (sphynx_ui_is_external(nativePath.c_str()) == 1) {
-#if PPSSPP_PLATFORM(ANDROID)
-			// The player screen is Java-side; ask the app shell to open it.
-			Sphynx_SendCommandToJava("sphynx_launch", nativePath.c_str());
-			return true;
-#else
-			// Desktop builds ship no player screen: fall through so the user gets
-			// PPSSPP's own handling instead of silence.
-#endif
-		}
-	}
+	if (SphynxRouteExternal(screenManager, path))
+		return true;
 
 	// Depending on the file type, we don't want to launch EmuScreen at all.
 	auto loader = ConstructFileLoader(path);

@@ -1182,6 +1182,18 @@ UI::EventReturn EmuScreen::OnResume(UI::EventParams &params) {
 void EmuScreen::update() {
 	using namespace UI;
 
+	// SPHYNX: last line of defence. Every launch path routes through
+	// SphynxRouteExternal() before this screen is even created; this block
+	// makes sure that a path nobody patched still ends up in the player
+	// instead of failing with "Failed initializing CPU or memory".
+	if (!sphynxRouted_) {
+		sphynxRouted_ = true;
+		if (SphynxRouteExternal(screenManager(), gamePath_)) {
+			screenManager()->switchScreen(new MainScreen());
+			return;
+		}
+	}
+
 	UIScreen::update();
 	resumeButton_->SetVisibility(coreState == CoreState::CORE_RUNTIME_ERROR && Memory::MemFault_MayBeResumable() ? V_VISIBLE : V_GONE);
 	resetButton_->SetVisibility(coreState == CoreState::CORE_RUNTIME_ERROR ? V_VISIBLE : V_GONE);

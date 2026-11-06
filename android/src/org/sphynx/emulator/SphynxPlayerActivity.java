@@ -13,11 +13,20 @@
 //    * a failure must be *visible*: an error that only goes to logcat looks
 //      exactly like a black screen to the user
 //
+//  Added in this stage:
+//    * a Menu button with Save state / Load state / Settings / Close
+//    * four save-state slots per game, written next to the app's save data
+//    * Settings: sound, touch controls, fast forward, frame-rate display,
+//      sharp/smooth filtering and screen fit — remembered across launches
+//    * the game is given its own BIOS folder (PSP/SYSTEMS_BIOS/<system>)
+//
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
 package org.sphynx.emulator;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -25,6 +34,7 @@ import android.media.AudioTrack;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -32,9 +42,11 @@ import android.view.ViewGroup;
 import android.view.ViewGroup.LayoutParams;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -53,24 +65,37 @@ public class SphynxPlayerActivity extends Activity {
 	private static final int B = 0, Y = 1, SELECT = 2, START = 3,
 			UP = 4, DOWN = 5, LEFT = 6, RIGHT = 7, A = 8, X = 9, L = 10, R = 11;
 
+	// How many save-state slots the menu offers, per game.
+	private static final int STATE_SLOTS = 4;
+
+	private static final String PREFS = "sphynx_player";
+
 	private GLSurfaceView surface;
 	private AudioThread audio;
 	private TextView overlay;
+	private View controls;
 	private final AtomicBoolean running = new AtomicBoolean(false);
 	private int frameCounter;
 
 	/** Set once the native session exists, so onResume knows to restart audio. */
 	private boolean sessionReady;
 
+	private String systemKey = "";
+	private SharedPreferences prefs;
+
 	@Override
 	protected void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 		SphynxExtCore.attachContext(this);
+		prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
 		if (!SphynxExtCore.isAvailable()) {
 			fail("The emulator engine is missing from this build (libsphynx_extcore.so).");
 			return;
 		}
+		// Make sure the BIOS tree exists even when the player is opened without
+		// going through PPSSPP's own main screen first.
+		SphynxExtCore.ensureBiosTree(this);
 
 		String requested = getIntent() != null ? getIntent().getStringExtra(EXTRA_PATH) : null;
 		if (requested == null || requested.isEmpty()) {
@@ -88,8 +113,8 @@ public class SphynxPlayerActivity extends Activity {
 		}
 		Log.i(TAG, "playing " + path);
 
-		String systemKey = detectSystem(path);
-		if (systemKey == null || systemKey.isEmpty()) {
+		String detected = detectSystem(path);
+		if (detected == null || detected.isEmpty()) {
 			// Shared extensions (.cue / .chd / .iso) can belong to several
 			// systems. Ask exactly once, then play.
 			final String[] choices = candidateSystems(path);
@@ -100,13 +125,14 @@ public class SphynxPlayerActivity extends Activity {
 			fail("This game file was not recognised.\n" + path);
 			return;
 		}
-		startWithSystem(path, systemKey);
+		startWithSystem(path, detected);
 	}
 
-	private void startWithSystem(String path, String systemKey) {
-		String corePath = SphynxExtCore.corePath(systemKey, getApplicationInfo().nativeLibraryDir);
+	private void startWithSystem(String path, String key) {
+		systemKey = key;
+		String corePath = SphynxExtCore.corePath(key, getApplicationInfo().nativeLibraryDir);
 		if (corePath == null || corePath.isEmpty()) {
-			fail("The emulator for this system is not in this build.\n(" + systemKey + ")");
+			fail("The emulator for this system is not in this build.\n(" + key + ")");
 			return;
 		}
 		File core = new File(corePath);
@@ -114,14 +140,22 @@ public class SphynxPlayerActivity extends Activity {
 			fail("The emulator file is missing:\n" + corePath);
 			return;
 		}
-		launch(path, corePath, systemKey);
+		launch(path, corePath);
 	}
 
-	private void launch(String path, String corePath, String systemKey) {
-		// Same folders the rest of the app uses: BIOS is looked up in PPSSPP's
-		// own PSP/SYSTEM when it exists, saves stay app-private.
-		File sysDir = new File(SphynxExtCore.systemDir(this));
+	private void launch(String path, String corePath) {
+		// Each system gets its own BIOS folder (PSP/SYSTEMS_BIOS/<system>); systems
+		// without a BIOS fall back to PPSSPP's normal PSP/SYSTEM folder.
+		File sysDir = new File(SphynxExtCore.systemDirForSystem(this, systemKey));
 		File saveDir = new File(SphynxExtCore.saveDir(this));
+
+		SphynxPlayer.nativeSetSystem(systemKey);
+		applySetting("sound", prefs.getBoolean("sound", true));
+		applySetting("pad", prefs.getBoolean("pad", true));
+		applySetting("fastforward", prefs.getBoolean("fastforward", false));
+		applySetting("smooth", prefs.getBoolean("smooth", false));
+		applySetting("showfps", prefs.getBoolean("showfps", true));
+		applySetting("aspect", prefs.getInt("aspect", 0));
 
 		String err;
 		try {
@@ -136,14 +170,7 @@ public class SphynxPlayerActivity extends Activity {
 		}
 		if (err != null && !err.isEmpty()) {
 			Log.e(TAG, "start failed: " + err);
-			StringBuilder message = new StringBuilder("This game could not be started:\n");
-			message.append(err).append("\n\nSystem: ").append(systemKey);
-			String bios = SphynxExtCore.biosHint(systemKey);
-			if (bios != null && !bios.isEmpty()) {
-				message.append("\nThis system needs a BIOS file: ").append(bios);
-			}
-			message.append("\n\nBIOS folder:\n").append(sysDir.getAbsolutePath());
-			fail(message.toString());
+			fail(startFailureMessage(err, sysDir));
 			return;
 		}
 		sessionReady = true;
@@ -158,7 +185,8 @@ public class SphynxPlayerActivity extends Activity {
 		root.addView(surface, new FrameLayout.LayoutParams(
 				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-		root.addView(buildControls(), new FrameLayout.LayoutParams(
+		controls = buildControls();
+		root.addView(controls, new FrameLayout.LayoutParams(
 				ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
 		overlay = new TextView(this);
@@ -171,9 +199,25 @@ public class SphynxPlayerActivity extends Activity {
 		op.setMargins(dp(10), dp(8), 0, 0);
 		root.addView(overlay, op);
 
+		root.addView(buildMenuButton(), menuButtonParams());
+
 		setContentView(root);
+		applyVisibilitySettings();
 		startAudio();
 		running.set(true);
+	}
+
+	/** The message shown when a core refuses to start: never a bare "failed". */
+	private String startFailureMessage(String err, File sysDir) {
+		StringBuilder message = new StringBuilder("This game could not be started:\n");
+		message.append(err).append("\n\nSystem: ").append(systemKey);
+		String bios = SphynxPlayer.nativeBiosStatus();
+		if (bios != null && !bios.isEmpty() && !bios.equals("not needed by this system")) {
+			message.append("\nBIOS: ").append(bios);
+		}
+		message.append("\nBIOS folder:\n").append(sysDir.getAbsolutePath());
+		message.append("\n\nSave states: ").append(SphynxExtCore.saveDir(this)).append("/states");
+		return message.toString();
 	}
 
 	/** Shows the reason on screen. A toast alone was invisible in practice. */
@@ -219,7 +263,7 @@ public class SphynxPlayerActivity extends Activity {
 			int bar = choices[i].indexOf('|');
 			labels[i] = bar >= 0 ? choices[i].substring(bar + 1) : choices[i];
 		}
-		new android.app.AlertDialog.Builder(this)
+		new AlertDialog.Builder(this)
 				.setTitle(org.ppsspp.ppsspp.R.string.sphynxChooseSystem)
 				.setItems(labels, (dialog, which) -> {
 					String key = choices[which];
@@ -247,6 +291,194 @@ public class SphynxPlayerActivity extends Activity {
 			head = null;
 		}
 		return SphynxExtCore.detect(path, head);
+	}
+
+	// --- menu: save state / load state / settings --------------------------
+	private View buildMenuButton() {
+		Button menu = new Button(this);
+		menu.setText("☰");
+		menu.setAlpha(0.45f);
+		menu.setBackgroundColor(Color.TRANSPARENT);
+		menu.setTextColor(Color.WHITE);
+		menu.setOnClickListener(v -> showMenu());
+		return menu;
+	}
+
+	private FrameLayout.LayoutParams menuButtonParams() {
+		FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(52), dp(44));
+		lp.gravity = Gravity.TOP | Gravity.END;
+		lp.setMargins(0, dp(6), dp(6), 0);
+		return lp;
+	}
+
+	private void showMenu() {
+		final String[] items = {
+				"Save state",
+				"Load state",
+				"Settings",
+				"Close game",
+		};
+		new AlertDialog.Builder(this)
+				.setTitle("Sphynx menu")
+				.setItems(items, (dialog, which) -> {
+					switch (which) {
+						case 0:
+							showSlots(true);
+							break;
+						case 1:
+							showSlots(false);
+							break;
+						case 2:
+							showSettings();
+							break;
+						default:
+							finish();
+							break;
+					}
+				})
+				.show();
+	}
+
+	/** Slot chooser for saving (save=true) or loading (save=false). */
+	private void showSlots(final boolean save) {
+		final String[] labels = new String[STATE_SLOTS];
+		for (int i = 0; i < STATE_SLOTS; ++i) {
+			boolean has = hasState(i);
+			labels[i] = "Slot " + (i + 1) + (has ? "  (saved)" : "  (empty)");
+		}
+		new AlertDialog.Builder(this)
+				.setTitle(save ? "Save state to…" : "Load state from…")
+				.setItems(labels, (dialog, which) -> {
+					final int slot = which;
+					if (!save && !hasState(slot)) {
+						toast("Slot " + (slot + 1) + " is empty.");
+						return;
+					}
+					String result;
+					try {
+						result = save ? SphynxPlayer.nativeSaveState(slot)
+								: SphynxPlayer.nativeLoadState(slot);
+					} catch (Throwable t) {
+						Log.e(TAG, "state operation failed", t);
+						toast("The save state operation failed.");
+						return;
+					}
+					if (result == null || result.isEmpty()) {
+						toast((save ? "Saved to slot " : "Loaded slot ") + (slot + 1));
+					} else {
+						toast(result);
+					}
+				})
+				.show();
+	}
+
+	private boolean hasState(int slot) {
+		try {
+			return SphynxPlayer.nativeHasState(slot);
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
+	/** Settings dialog: everything applies instantly and is remembered. */
+	private void showSettings() {
+		LinearLayout box = new LinearLayout(this);
+		box.setOrientation(LinearLayout.VERTICAL);
+		int pad = dp(20);
+		box.setPadding(pad, pad, pad, pad);
+
+		final CheckBox sound = checkBox("Sound", prefs.getBoolean("sound", true));
+		final CheckBox touch = checkBox("Touch controls", prefs.getBoolean("pad", true));
+		final CheckBox fast = checkBox("Fast forward", prefs.getBoolean("fastforward", false));
+		final CheckBox smooth = checkBox("Smooth filter (off = sharp pixels)",
+				prefs.getBoolean("smooth", false));
+		final CheckBox fps = checkBox("Show frame time", prefs.getBoolean("showfps", true));
+		box.addView(sound);
+		box.addView(touch);
+		box.addView(fast);
+		box.addView(smooth);
+		box.addView(fps);
+
+		// Screen fit: 0 fit, 1 stretch, 2 = 4:3.
+		final int[] aspect = {prefs.getInt("aspect", 0)};
+		final String[] aspectNames = {"Fit (keep proportions)", "Stretch to screen", "Force 4:3"};
+		final Button aspectButton = new Button(this);
+		aspectButton.setText("Screen: " + aspectNames[aspect[0]]);
+		aspectButton.setOnClickListener(v -> {
+			aspect[0] = (aspect[0] + 1) % aspectNames.length;
+			aspectButton.setText("Screen: " + aspectNames[aspect[0]]);
+		});
+		box.addView(aspectButton);
+
+		// Informational: which BIOS folder this game reads and what is missing.
+		TextView biosInfo = new TextView(this);
+		String status = SphynxPlayer.nativeBiosStatus();
+		biosInfo.setText("BIOS: " + status + "\nFolder: "
+				+ SphynxExtCore.systemDirForSystem(this, systemKey));
+		biosInfo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+		biosInfo.setTextColor(0xFFAAAAAA);
+		biosInfo.setPadding(0, dp(12), 0, 0);
+		box.addView(biosInfo);
+
+		new AlertDialog.Builder(this)
+				.setTitle("Settings")
+				.setView(box)
+				.setPositiveButton("Done", (dialog, which) -> {
+					prefs.edit()
+							.putBoolean("sound", sound.isChecked())
+							.putBoolean("pad", touch.isChecked())
+							.putBoolean("fastforward", fast.isChecked())
+							.putBoolean("smooth", smooth.isChecked())
+							.putBoolean("showfps", fps.isChecked())
+							.putInt("aspect", aspect[0])
+							.apply();
+					applySetting("sound", sound.isChecked());
+					applySetting("pad", touch.isChecked());
+					applySetting("fastforward", fast.isChecked());
+					applySetting("smooth", smooth.isChecked());
+					applySetting("showfps", fps.isChecked());
+					applySetting("aspect", aspect[0]);
+					applyVisibilitySettings();
+				})
+				.show();
+	}
+
+	private CheckBox checkBox(String label, boolean value) {
+		CheckBox box = new CheckBox(this);
+		box.setText(label);
+		box.setTextColor(Color.WHITE);
+		box.setChecked(value);
+		return box;
+	}
+
+	private void applySetting(String key, boolean value) {
+		try {
+			SphynxPlayer.nativeSetOption(key, value ? 1 : 0);
+		} catch (Throwable t) {
+			Log.w(TAG, "cannot apply " + key, t);
+		}
+	}
+
+	private void applySetting(String key, int value) {
+		try {
+			SphynxPlayer.nativeSetOption(key, value);
+		} catch (Throwable t) {
+			Log.w(TAG, "cannot apply " + key, t);
+		}
+	}
+
+	/** Touch pad + frame-time line follow the Settings switches. */
+	private void applyVisibilitySettings() {
+		if (controls != null) {
+			controls.setVisibility(prefs.getBoolean("pad", true) ? View.VISIBLE : View.GONE);
+		}
+		if (overlay != null) {
+			overlay.setVisibility(prefs.getBoolean("showfps", true) ? View.VISIBLE : View.GONE);
+		}
+	}
+
+	private void toast(String message) {
+		Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
 	}
 
 	// --- on-screen pad -----------------------------------------------------
@@ -363,8 +595,9 @@ public class SphynxPlayerActivity extends Activity {
 			if (status == 1) {
 				running.set(false);
 				runOnUiThread(() -> fail("The emulator stopped.\n"
-						+ "This system may be too heavy for this device, or it needs a BIOS file.\n\n"
-						+ String.valueOf(SphynxPlayer.nativeStatus())));
+						+ "This system may be too heavy for this device, or it needs a BIOS file.\n"
+						+ "BIOS: " + String.valueOf(SphynxPlayer.nativeBiosStatus())
+						+ "\n\n" + String.valueOf(SphynxPlayer.nativeStatus())));
 				return;
 			}
 			if (overlay != null && (++frameCounter % 60) == 0) {

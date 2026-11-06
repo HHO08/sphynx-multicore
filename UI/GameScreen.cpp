@@ -521,6 +521,12 @@ UI::EventReturn GameScreen::OnSwitchBack(UI::EventParams &e) {
 }
 
 UI::EventReturn GameScreen::OnPlay(UI::EventParams &e) {
+	// SPHYNX: a non-PSP game must never be booted by the PSP core. This is the
+	// exact path taken when a game is tapped in the grid, and it never went
+	// through LaunchFile() — the reason every external title used to fail with
+	// "Failed initializing CPU or memory".
+	if (SphynxRouteExternal(screenManager(), gamePath_))
+		return UI::EVENT_DONE;
 	screenManager()->switchScreen(new EmuScreen(gamePath_));
 	return UI::EVENT_DONE;
 }
