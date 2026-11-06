@@ -43,7 +43,9 @@ endif()
 
 add_library(sphynx_extcore SHARED ${SPHYNX_EXTCORE_SOURCES})
 
-target_include_directories(sphynx_extcore PRIVATE include)
+# 'src' is needed by the JNI translation units in jni/, which include the
+# portable headers that live next to the sources they wrap.
+target_include_directories(sphynx_extcore PRIVATE include src)
 target_compile_features(sphynx_extcore PRIVATE cxx_std_17)
 set_target_properties(sphynx_extcore PROPERTIES
 	POSITION_INDEPENDENT_CODE ON
