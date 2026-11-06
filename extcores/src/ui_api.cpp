@@ -246,7 +246,7 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	if (!*out) return 0;
 	std::memcpy(*out, png.data(), png.size());
 	*len = int(png.size());
-	g_last_error = "ok";
+	g_last_error = "ok (frame " + std::to_string(best_frames) + ")";
 	return 1;
 }
 
@@ -277,23 +277,37 @@ const char *sphynx_ui_candidates(const char *path) {
 const char *sphynx_ui_last_error(void) { return g_last_error.c_str(); }
 
 const char *sphynx_ui_extension_filter(void) {
-	// Built once.  Every extension of every Sphynx system, plus PPSSPP's own so
-	// that a single listing shows PSP and non-PSP games side by side.
+	// Built once: PPSSPP's own extensions plus every extension of every Sphynx
+	// system, so one listing shows PSP and non-PSP games side by side.
+	//
+	// Tokens are deduplicated as whole entries (not by substring) because
+	// several systems share suffixes like "88"/"d88" — a naive find() would let
+	// "d88" swallow "88" and silently hide those games.
+	//
+	// Archives stay out on purpose: PPSSPP installs .zip/.7z through its own
+	// flow, and routing them to a core would break that.
 	static std::string filter = [] {
-		std::string f = "iso:cso:chd:pbp:elf:prx:ppdmp:";
+		std::vector<std::string> tokens;
+		auto add = [&tokens](const char *e) {
+			if (!e || !*e) return;
+			if (std::strcmp(e, "zip") == 0 || std::strcmp(e, "7z") == 0) return;
+			std::string item(e);
+			for (char &c : item) c = char(std::tolower(static_cast<unsigned char>(c)));
+			for (const std::string &have : tokens)
+				if (have == item) return;
+			tokens.push_back(item);
+		};
+		for (const char *psp : {"iso", "cso", "chd", "pbp", "elf", "prx", "ppdmp"}) add(psp);
 		int n = 0;
 		const sphynx::SystemInfo *all = sphynx::AllSystems(&n);
-		auto add = [&f](const char *e) {
-			if (!e) return;
-			const std::string item = std::string(e) + ":";
-			if (f.find(item) == std::string::npos) f += item;
-		};
 		for (int i = 0; i < n; ++i)
-			for (int j = 0; j < all[i].extension_count; ++j) {
-				const char *e = all[i].extensions[j];
-				if (!e || std::strcmp(e, "zip") == 0 || std::strcmp(e, "7z") == 0) continue;
-				add(e);
-			}
+			for (int j = 0; j < all[i].extension_count; ++j) add(all[i].extensions[j]);
+		std::string f;
+		for (const std::string &t : tokens) {
+			if (!f.empty()) f += ':';
+			f += t;
+		}
+		f += ':';   // trailing separator, same shape as PPSSPP's own list
 		return f;
 	}();
 	return filter.c_str();
