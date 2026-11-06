@@ -32,8 +32,7 @@ jobs:
       fail-fast: false
       matrix:
         abi:
-          - arm64-v8a
-          - armeabi-v7a
+          - armeabi-v7a   # SPHYNX: single ABI by owner decision
 
     steps:
       - name: Checkout (with submodules)

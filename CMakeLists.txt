@@ -3054,6 +3054,6 @@ if(SPHYNX_EXTCORE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extcores/CMakeLists.tx
 	# (game list, thumbnail cache) can call into it without a second JNI hop.
 	# The PSP emulator itself never calls these symbols.
 	if(TARGET sphynx_extcore AND TARGET ${CoreLibName})
-		target_link_libraries(${CoreLibName} PRIVATE sphynx_extcore)
+		target_link_libraries(${CoreLibName} sphynx_extcore)
 	endif()
 endif()
