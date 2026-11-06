@@ -28,6 +28,10 @@ int sphynx_ui_is_external(const char *path);
 int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len);
 void sphynx_ui_free(void *p);
 
+// Opens the Sphynx player screen for this file (Android). Returns 1 if the
+// request was handed to the Java layer, 0 when running headless (tests).
+int sphynx_ui_launch(const char *path);
+
 // "key|Display name;key|Display name;..." — systems that could claim this file.
 // Used when an extension is shared by several systems (.cue/.chd/.iso).
 const char *sphynx_ui_candidates(const char *path);

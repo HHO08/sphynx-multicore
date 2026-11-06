@@ -81,7 +81,7 @@ bool LaunchFile(ScreenManager *screenManager, const Path &path) {
 	if (path.Type() == PathType::NATIVE) {
 		const std::string nativePath = path.ToString();
 		if (sphynx_ui_is_external(nativePath.c_str()) == 1) {
-			System_SendMessage("sphynx_launch", nativePath.c_str());
+			sphynx_ui_launch(nativePath.c_str());
 			return true;
 		}
 	}
