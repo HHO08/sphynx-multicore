@@ -13,4 +13,5 @@
 	<string name="sphynxCoreMissing">The emulator core for this system is missing in this build.</string>
 	<string name="sphynxStartFailed">Could not start this system:</string>
 	<string name="sphynxCoreStopped">The emulator stopped (it may be too heavy for this device).</string>
+	<string name="sphynxChooseSystem">Which system is this disc?</string>
 </resources>
