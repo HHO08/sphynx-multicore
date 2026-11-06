@@ -97,7 +97,7 @@ jobs:
               -o out/host_ui_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
-              extcores/tests/host_ui_test.cpp -ldl
+              extcores/src/android_paths.cpp extcores/tests/host_ui_test.cpp -ldl
           ./out/host_ui_test | tee out/host-ui-test.txt
 
           # Stage 5: the real play path, end to end on the host toolchain —
