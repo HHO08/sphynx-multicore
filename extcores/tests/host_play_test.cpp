@@ -165,6 +165,21 @@ void TestThumbnail(const std::string &stub_core, const std::string &nativelib,
 	Check(std::memcmp(png, kSig, 8) == 0, "thumbnail is a valid PNG");
 	Check(len > 24 && std::memcmp(png + 12, "IHDR", 4) == 0, "thumbnail has an IHDR chunk");
 	sphynx_ui_free(png);
+
+	// The same game, this time reached through the content:// URI that Android
+	// really hands over. This is the exact path the user reported as failing.
+	const std::string uri =
+		"content://com.android.externalstorage.documents/tree/primary%3APSP%2FGAME"
+		"/document/primary%3APSP%2FGAME%2FYs%20III%20(USA).sfc";
+	unsigned char *png2 = nullptr;
+	int len2 = 0;
+	const bool ok2 = sphynx_ui_make_thumbnail(uri.c_str(), &png2, &len2) == 1;
+	Check(ok2, std::string("thumbnail generated from a content:// URI (") +
+	               sphynx_ui_last_error() + ")");
+	if (ok2 && png2) {
+		Check(len2 > 60 && std::memcmp(png2, kSig, 8) == 0, "URI thumbnail is a valid PNG");
+		sphynx_ui_free(png2);
+	}
 }
 
 // --- 4. the player session ---------------------------------------------------
