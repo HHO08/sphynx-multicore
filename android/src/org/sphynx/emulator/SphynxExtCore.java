@@ -55,6 +55,17 @@ public final class SphynxExtCore {
 		return isAvailable() ? nativeStart(corePath, contentPath, systemDir, saveDir) : "unavailable";
 	}
 
+	/** Absolute path of the bundled core for a system key, or "" when absent. */
+	public static String corePath(String systemKey, String nativeLibraryDir) {
+		return isAvailable() ? nativeCorePath(systemKey, nativeLibraryDir) : "";
+	}
+
+	/** How many emulator cores this build carries (expected: 23). */
+	public static int bundledCoreCount() { return isAvailable() ? nativeBundledCoreCount() : 0; }
+
+	/** "core:file;core:file;..." — for the about screen / diagnostics. */
+	public static String bundledCores() { return isAvailable() ? nativeBundledCores() : ""; }
+
 	public static boolean runFrame() { return isAvailable() && nativeRunFrame(); }
 	public static void stop() { if (isAvailable()) nativeStop(); }
 
@@ -63,6 +74,9 @@ public final class SphynxExtCore {
 	private static native int nativeSystemCount();
 	private static native String nativeDetect(String path, byte[] head);
 	private static native String nativeStart(String corePath, String contentPath, String systemDir, String saveDir);
+	private static native String nativeCorePath(String systemKey, String nativeLibraryDir);
+	private static native int nativeBundledCoreCount();
+	private static native String nativeBundledCores();
 	private static native boolean nativeRunFrame();
 	private static native void nativeStop();
 }

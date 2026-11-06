@@ -65,6 +65,46 @@ Java_org_sphynx_emulator_SphynxExtCore_nativeSystemCount(JNIEnv *, jclass) {
 	return sphynx::SystemCount();
 }
 
+// Absolute path of the bundled core for a system key, or "" when absent.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeCorePath(JNIEnv *env, jclass, jstring jkey,
+                                                     jstring jlibdir) {
+	auto str = [&](jstring s) -> std::string {
+		if (!s) return std::string();
+		const char *c = env->GetStringUTFChars(s, nullptr);
+		std::string out = c ? c : "";
+		env->ReleaseStringUTFChars(s, c);
+		return out;
+	};
+	const std::string key = str(jkey);
+	const std::string dir = str(jlibdir);
+	std::string path;
+	if (key == "psp") return ToJavaString(env, "");   // no external core for PSP
+	path = sphynx::CoreLibraryPathForSystem(dir, key.c_str());
+	return ToJavaString(env, path);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBundledCoreCount(JNIEnv *, jclass) {
+	return sphynx::BundledCoreCount();
+}
+
+// "name:file;name:file;..." — used by the about screen and by CI checks.
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeBundledCores(JNIEnv *env, jclass) {
+	std::string out;
+	const int n = sphynx::BundledCoreCount();
+	const char *const *libs = sphynx::BundledCoreLibs();
+	for (int i = 0; i < n; ++i) {
+		out += libs[i];
+		out += ':';
+		const char *file = sphynx::CoreLibraryFile(libs[i]);
+		out += file ? file : "?";
+		if (i + 1 < n) out += ';';
+	}
+	return ToJavaString(env, out);
+}
+
 // Detects the system for `path`. `head` is an optional 4 KiB prefix.
 // Returns the best system key, or "" when the user must be asked.
 extern "C" JNIEXPORT jstring JNICALL

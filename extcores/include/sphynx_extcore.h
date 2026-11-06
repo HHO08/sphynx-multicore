@@ -136,6 +136,28 @@ const CoreInfo *FindCore(const char *core_lib);
 int SystemCount();                                   // == 35, asserted by tests
 
 // ---------------------------------------------------------------------------
+// 2b. Bundled core binaries
+//
+//  Sphynx ships the cores inside the APK as ordinary native libraries, so the
+//  Android platform extracts them to applicationInfo.nativeLibraryDir and the
+//  host can dlopen() them by absolute path (the only reliable way on modern
+//  Android). These helpers turn a registry entry into that absolute path.
+// ---------------------------------------------------------------------------
+
+// "gambatte" -> "libsphynx_core_gambatte.so" (nullptr for unknown cores).
+const char *CoreLibraryFile(const char *core_lib);
+
+// Absolute path of the bundled binary, or "" when this build does not carry it.
+std::string CoreLibraryPath(const std::string &native_library_dir, const char *core_lib);
+
+// Same, but for a system key ("gb", "snes", ...); convenient for the UI.
+std::string CoreLibraryPathForSystem(const std::string &native_library_dir, const char *system_key);
+
+// How many core files this build actually bundles (compile-time list).
+int BundledCoreCount();
+const char *const *BundledCoreLibs();
+
+// ---------------------------------------------------------------------------
 // 3. Content detection
 // ---------------------------------------------------------------------------
 

@@ -111,6 +111,10 @@ android {
 		}
 	}
 	packagingOptions {
+		// SPHYNX: the cores are published prebuilt by their authors; they are
+		// already stripped and must not be touched by the Android toolchain.
+		doNotStrip "**/libsphynx_core_*.so"
+
 		jniLibs.useLegacyPackaging = true
 	}
 	sourceSets {
@@ -125,6 +129,8 @@ android {
 			]
 		}
 		normal {
+			// SPHYNX: bundled emulator cores live here (fetched by Tools/sphynx/fetch_cores.sh)
+			sourceSets { jniLibs.srcDirs += 'src/normal/jniLibs' }
 			res.srcDirs = ['normal/res']
 		}
 		gold {
@@ -154,15 +160,14 @@ android {
 				}
 			}
 			ndk {
-				// SPHYNX: per-ABI build.  We ship one APK per ARM ABI instead of a fat
-				// APK (this is the largest single size win: ~45% off the download).
-				// x86_64 is dropped on purpose: Sphynx targets ARM devices only.
-				// Pass -PsphynxAbi=arm64-v8a (or armeabi-v7a) to build one ABI.
+				// SPHYNX: 32-bit ARM only.  The owner ships a single armeabi-v7a
+				// APK: it halves build time and memory, and every 64-bit ARM phone
+				// still runs 32-bit code.  Override with -PsphynxAbi=... if needed.
 				def sphynxAbi = project.findProperty('sphynxAbi')
 				if (sphynxAbi != null && !sphynxAbi.isEmpty()) {
 					abiFilters(*sphynxAbi.split(','))
 				} else {
-					abiFilters 'armeabi-v7a', 'arm64-v8a'
+					abiFilters 'armeabi-v7a'
 				}
 			}
 		}

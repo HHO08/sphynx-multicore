@@ -332,6 +332,63 @@ DetectResult Detect(const std::string &path, const uint8_t *head, size_t head_si
 	return r;
 }
 
+// --- bundled core binaries -------------------------------------------------
+// The value is the libretro buildbot name, which is what Tools/sphynx/
+// fetch_cores.sh downloads and renames to libsphynx_core_<name>.so.
+const char *const kBundledCoreLibs[] = {
+	"fceumm", "gambatte", "mgba", "mupen64plus_next_gles2", "melonds", "bsnes",
+	"gearsystem", "picodrive", "mednafen_saturn", "flycast", "opera", "puae",
+	"fbneo", "bluemsx", "mednafen_wswan", "pcsx_rearmed", "np2kai",
+	"mednafen_pcfx", "mednafen_pce_fast", "mednafen_pce", "dosbox_pure",
+	"scummvm", "mednafen_ngp",
+};
+
+// Registry name -> bundled file name (only where they differ).
+const char *BundledNameFor(const char *core_lib) {
+	if (!core_lib) return nullptr;
+	// Nintendo 64 rides the GLES2 build on purpose: on 32-bit ARM the GLES2
+	// renderer is the only one that reaches playable speed.
+	if (std::strcmp(core_lib, "mupen64plus_next") == 0) return "mupen64plus_next_gles2";
+	for (const char *name : kBundledCoreLibs)
+		if (std::strcmp(name, core_lib) == 0) return name;
+	return nullptr;
+}
+
+int BundledCoreCount() {
+	return static_cast<int>(sizeof(kBundledCoreLibs) / sizeof(kBundledCoreLibs[0]));
+}
+
+const char *const *BundledCoreLibs() { return kBundledCoreLibs; }
+
+const char *CoreLibraryFile(const char *core_lib) {
+	// Static per-core strings so callers can keep the pointer.
+	static std::string files[sizeof(kBundledCoreLibs) / sizeof(kBundledCoreLibs[0])];
+	const char *name = BundledNameFor(core_lib);
+	if (!name) return nullptr;
+	for (size_t i = 0; i < sizeof(kBundledCoreLibs) / sizeof(kBundledCoreLibs[0]); ++i) {
+		if (std::strcmp(kBundledCoreLibs[i], name) == 0) {
+			if (files[i].empty()) files[i] = std::string("libsphynx_core_") + name + ".so";
+			return files[i].c_str();
+		}
+	}
+	return nullptr;
+}
+
+std::string CoreLibraryPath(const std::string &native_library_dir, const char *core_lib) {
+	const char *file = CoreLibraryFile(core_lib);
+	if (!file || native_library_dir.empty()) return std::string();
+	std::string path = native_library_dir;
+	if (path.back() != '/') path += '/';
+	path += file;
+	return path;
+}
+
+std::string CoreLibraryPathForSystem(const std::string &native_library_dir, const char *system_key) {
+	const SystemInfo *info = FindSystemByKey(system_key);
+	if (!info) return std::string();
+	return CoreLibraryPath(native_library_dir, info->core_lib);
+}
+
 bool SelfCheck(std::string *report) {
 	std::string out;
 	bool ok = true;
@@ -349,6 +406,11 @@ bool SelfCheck(std::string *report) {
 		}
 		if (!FindCore(s.core_lib)) {
 			out += std::string("FAIL: ") + s.key + " -> unknown core " + s.core_lib + "\n";
+			ok = false;
+		}
+		if (!BundledNameFor(s.core_lib)) {
+			out += std::string("FAIL: ") + s.key + " -> core " + s.core_lib +
+			       " is not bundled in this build\n";
 			ok = false;
 		}
 		if (s.extension_count <= 0) {
@@ -373,7 +435,8 @@ bool SelfCheck(std::string *report) {
 		}
 	}
 	out += "systems=" + std::to_string(SystemCount()) + " cores=" +
-	       std::to_string(static_cast<int>(sizeof(kCores) / sizeof(kCores[0]))) + "\n";
+	       std::to_string(static_cast<int>(sizeof(kCores) / sizeof(kCores[0]))) +
+	       " bundled=" + std::to_string(BundledCoreCount()) + "\n";
 	if (report) *report = out;
 	return ok;
 }
