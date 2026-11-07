@@ -80,7 +80,12 @@ void GameScreen::update() {
 	if (!sphynxChecked_) {
 		sphynxChecked_ = true;
 		if (SphynxRouteExternal(screenManager(), gamePath_)) {
-			TriggerFinish(DR_BACK);
+			// SPHYNX (core-running system, stage 11): the player screen has just
+			// replaced this game sheet, so this screen must simply stop working.
+			// Finishing a dialog that is no longer on the stack is a no-op that
+			// logs "Wrong dialog being finished!" - and, worse, on the paths where
+			// the sheet is still in the stack it popped the player away from the
+			// running game. Returning here leaves the game on screen.
 			return;
 		}
 	}

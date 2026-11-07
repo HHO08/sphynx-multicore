@@ -332,6 +332,21 @@ void SphynxPlayerScreen::update() {
 		return;
 	}
 
+	// SPHYNX (button system, stage 11): PPSSPP's touch buttons are drawn with the
+	// file-static g_gamepadOpacity in UI/GamepadEmu.cpp, and that value starts at
+	// 0. Only EmuScreen ever refreshes it, and it does so by calling
+	// GamepadUpdateOpacity() with no argument - which forces the value to 0
+	// whenever coreState != CORE_RUNNING. Here no PSP core exists, so coreState
+	// is never CORE_RUNNING: the result was a pad drawn with alpha 0, i.e. the
+	// PPSSPP buttons were there but invisible.
+	//
+	// V5 solves it the same way: its RetroScreen::update() calls
+	// GamepadUpdateOpacity(g_Config.iTouchButtonOpacity / 100.0f), the "forced"
+	// form of the call, which sets the exact opacity the user configured and
+	// skips the coreState gate. Same call, same value, same result: the pad now
+	// looks exactly like the pad in a PSP game.
+	GamepadUpdateOpacity(g_Config.iTouchButtonOpacity / 100.0f);
+
 	RunFrames();
 	UploadFrame();
 }
@@ -488,7 +503,17 @@ void SphynxPlayerScreen::UploadFrame() {
 
 	// Frames can change size at runtime (a core switching resolutions), so the
 	// texture is re-created when the incoming frame differs from it.
-	upload_.resize(upload_.size() ? upload_.size() : 1024 * 512 * 4);
+	if (upload_.empty()) upload_.resize(1024 * 512 * 4);
+	// SPHYNX (core-running system, stage 11): size the buffer from the frame that
+	// is actually waiting. The old code took the frame into a fixed 2 MB buffer,
+	// and take_frame() throws the frame away when it does not fit - so an arcade
+	// core at 1024x1024 (4 MB) produced a permanently black screen with sound
+	// playing, which is indistinguishable from "the game did not start".
+	int need_w = 0, need_h = 0;
+	if (sphynx_player_frame_size(player_, &need_w, &need_h) == 1 && need_w > 0 && need_h > 0) {
+		const size_t needed = static_cast<size_t>(need_w) * static_cast<size_t>(need_h) * 4u;
+		if (upload_.size() < needed) upload_.resize(needed);
+	}
 	for (int attempt = 0; attempt < 2; ++attempt) {
 		int w = 0, h = 0;
 		if (!sphynx_player_take_frame(player_, upload_.data(), (int)upload_.size(), &w, &h)) {
@@ -652,6 +677,11 @@ bool SphynxPlayerScreen::key(const KeyInput &key) {
 }
 
 bool SphynxPlayerScreen::UnsyncTouch(const TouchInput &touch) {
+	// SPHYNX (button system, stage 11): every touch is a "the pad is in use"
+	// signal. Without this the fade timer in GamepadEmu.cpp never restarts, so
+	// the buttons would fade out and stay out. V5's RetroScreen::UnsyncTouch()
+	// starts with exactly this call, and so does EmuScreen::UnsyncTouch().
+	GamepadTouch();
 	// Same path as EmuScreen: the pad layout gets a chance first, then the UI.
 	if (root_)
 		UIScreen::UnsyncTouch(touch);
@@ -692,5 +722,13 @@ void SphynxPlayerScreen::focusChanged(ScreenFocusChange focusChange) {
 		// Returning from a menu: do not count the menu time as game time.
 		lastTime_ = time_now_d();
 		frameDebt_ = 0.0;
+		// SPHYNX (settings style, stage 11): PPSSPP's Settings screen can have
+		// changed what the buttons look like (opacity, scale, layout, show/hide).
+		// EmuScreen rebuilds its views after settings for the same reason; without
+		// this the pad kept the old look until the game was reopened, which reads
+		// as "the settings do not work here". A failure panel lives in root_ and
+		// must not be rebuilt away, so it is left alone.
+		if (!failed_)
+			RecreateViews();
 	}
 }

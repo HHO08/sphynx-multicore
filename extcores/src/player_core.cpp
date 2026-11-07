@@ -144,11 +144,26 @@ public:
 		return true;
 	}
 
+	// Size of the frame that is waiting (0x0 when nothing new). No copy, so the
+	// player can size its destination buffer *before* calling Take(): Take()
+	// consumes the frame, so a buffer that is too small silently loses it and
+	// the screen stays black for every core that renders bigger than the guess.
+	void Peek(int *w, int *h) const {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (!fresh_) {
+			*w = 0;
+			*h = 0;
+			return;
+		}
+		*w = width_;
+		*h = height_;
+	}
+
 	int width() const { return width_; }
 	int height() const { return height_; }
 
 private:
-	std::mutex mutex_;
+	mutable std::mutex mutex_;
 	std::vector<uint8_t> pixels_;
 	int width_ = 0;
 	int height_ = 0;
@@ -361,10 +376,17 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 		return 0;
 	});
 
-	// A Saturn or Dreamcast core can spend a second or two on its first frame
-	// (BIOS checks, shader-ish init). The watchdog is there to catch a genuine
-	// hang, not to turn a slow phone into an error message, so it is generous.
-	p->session.SetWatchdogMs(10000);
+	// SPHYNX (core-running system, stage 11): the frame-budget watchdog is off
+	// for playback. It used to stop the core when a single retro_run() took more
+	// than 10 s - which a CD-based system (PlayStation, Saturn, Sega CD) or the
+	// very first frame of melonDS/DOSBox does routinely on a 32-bit ARM phone.
+	// The visible result was "the game closes by itself a few seconds after it
+	// starts": the core was killed by our own watchdog, not by the game.
+	//
+	// V5 has no such watchdog at all: RetroHost::RunFrame() simply runs the core
+	// and the screen keeps going. A slow frame is not a failure, so nothing here
+	// may ever decide to stop the game. Only the core itself, or the user, may.
+	p->session.SetWatchdogMs(0);
 
 	std::string start_error;
 	if (!p->session.Start(core_path, local, system_dir, p->save_dir, &start_error)) {
@@ -438,6 +460,20 @@ int sphynx_player_run(SphynxPlayerHandle *p) {
 		FlushBatterySave(p);
 	}
 	return result;
+}
+
+// SPHYNX (core-running system, stage 11): reports the size of the frame waiting
+// in the queue without consuming it, so the caller can make its buffer big
+// enough. Returns 1 when a frame is waiting, 0 when not.
+int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width, int *height) {
+	if (width) *width = 0;
+	if (height) *height = 0;
+	if (!p) return 0;
+	int w = 0, h = 0;
+	p->frame.Peek(&w, &h);
+	if (width) *width = w;
+	if (height) *height = h;
+	return (w > 0 && h > 0) ? 1 : 0;
 }
 
 int sphynx_player_take_frame(SphynxPlayerHandle *p, unsigned char *dst, int dst_size,

@@ -1210,7 +1210,11 @@ void EmuScreen::update() {
 	if (!sphynxRouted_) {
 		sphynxRouted_ = true;
 		if (SphynxRouteExternal(screenManager(), gamePath_)) {
-			screenManager()->switchScreen(new MainScreen());
+			// SPHYNX (core-running system, stage 11): do NOT switch to MainScreen
+			// here. SphynxRouteExternal() has already switched to the player
+			// screen; switching again replaced it with the game list one frame
+			// later, which is exactly the "it throws me back to the front end"
+			// behaviour. The player is now the only screen; nothing follows it.
 			return;
 		}
 	}

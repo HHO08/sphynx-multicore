@@ -76,6 +76,13 @@ SPHYNX_PLAYER_EXPORT int sphynx_player_run(SphynxPlayerHandle *p);
 // a no-op returning 0 when the buffer is too small or nothing new arrived, so
 // the renderer can simply skip the upload and reuse the previous texture.
 // Returns 1 when a frame was copied.
+//
+// SPHYNX (stage 11): ask sphynx_player_frame_size() first. take_frame() consumes
+// the frame even when it does not fit, so a caller that guesses a buffer size
+// drops the frames of any core that renders larger than the guess - which is
+// exactly what a black screen with working sound looks like.
+SPHYNX_PLAYER_EXPORT int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width,
+                                                  int *height);
 SPHYNX_PLAYER_EXPORT int sphynx_player_take_frame(SphynxPlayerHandle *p,
                                                  unsigned char *dst, int dst_size,
                                                  int *width, int *height);

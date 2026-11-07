@@ -205,6 +205,52 @@ def main(root: str) -> int:
             if needed not in text:
                 problems.append(f"UI/SphynxPlayerScreen.cpp lost {needed}")
 
+    # 6. Stage 11 — the two failures the owner reported after stage 10, and the
+    # one picture bug that looks exactly like a third one.
+    #
+    #    a) The touch buttons were drawn with alpha 0. PPSSPP's pad is painted
+    #       with g_gamepadOpacity, a file-static that starts at 0 and is only
+    #       refreshed by EmuScreen - where the call is forced to 0 whenever
+    #       coreState != CORE_RUNNING, which is always true outside a PSP game.
+    #       V5 solves it exactly this way: GamepadUpdateOpacity(opacity/100).
+    #    b) Nothing reset the fade timer, so the buttons faded out for good.
+    #       V5's RetroScreen::UnsyncTouch() starts with GamepadTouch().
+    if screen.exists():
+        text = screen.read_text(encoding="utf-8", errors="surrogateescape")
+        if "GamepadUpdateOpacity(" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not refresh the pad opacity: the buttons would be invisible")
+        if "GamepadTouch()" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not reset the pad fade timer on touch")
+        if "sphynx_player_frame_size(" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp takes frames without sizing the buffer (large frames would never appear)")
+
+    #    c) The game must not be stopped by us. The frame-budget watchdog used to
+    #       kill CD-based cores on slow phones a few seconds after launch.
+    player_core = repo / "extcores" / "src" / "player_core.cpp"
+    if player_core.exists():
+        text = player_core.read_text(encoding="utf-8", errors="surrogateescape")
+        if "SetWatchdogMs(0)" not in text:
+            problems.append("extcores/src/player_core.cpp arms a frame watchdog again: it would stop slow cores")
+        if re.search(r"SetWatchdogMs\((?!0\))\d", text):
+            problems.append("extcores/src/player_core.cpp sets a non-zero frame watchdog")
+
+    #    d) After the player screen has taken over, the screen it replaced must do
+    #       nothing at all. Switching to MainScreen (or finishing a dialog) right
+    #       after the route is the "it throws me back to the front end" bug.
+    emu = repo / "UI" / "EmuScreen.cpp"
+    if emu.exists():
+        text = emu.read_text(encoding="utf-8", errors="surrogateescape")
+        marker = "if (SphynxRouteExternal(screenManager(), gamePath_)) {"
+        at = text.find(marker)
+        if at >= 0 and "switchScreen" in text[at:at + 400]:
+            problems.append("UI/EmuScreen.cpp switches screens again after SphynxRouteExternal() took over")
+    game_screen = repo / "UI" / "GameScreen.cpp"
+    if game_screen.exists():
+        text = game_screen.read_text(encoding="utf-8", errors="surrogateescape")
+        at = text.find("SphynxRouteExternal(screenManager(), gamePath_)")
+        if at >= 0 and "TriggerFinish" in text[at:at + 300]:
+            problems.append("UI/GameScreen.cpp finishes the game sheet after the player took over")
+
     if problems:
         print("\nROUTING CHECK FAILED:")
         for p in problems:
