@@ -738,6 +738,32 @@ double sphynx_player_frame_ms(SphynxPlayerHandle *p) {
 	return p ? p->frame_ms.load() : 0.0;
 }
 
+// Reports the size of the frame waiting in the queue without consuming it, so the
+// caller can size its buffer first. Returns 1 when a frame is waiting.
+int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width, int *height) {
+	if (width) *width = 0;
+	if (height) *height = 0;
+	if (!p) return 0;
+	int w = 0, h = 0;
+	p->frame.Peek(&w, &h);
+	if (width) *width = w;
+	if (height) *height = h;
+	return (w > 0 && h > 0) ? 1 : 0;
+}
+
+int sphynx_player_take_frame(SphynxPlayerHandle *p, unsigned char *dst, int dst_size,
+                             int *width, int *height) {
+	if (!p || !dst || dst_size <= 0) return 0;
+	int w = 0, h = 0, bytes = 0;
+	const uint8_t *src = p->frame.Take(&w, &h, &bytes);
+	if (!src || bytes <= 0) return 0;
+	if (bytes > dst_size) return 0;
+	std::memcpy(dst, src, static_cast<size_t>(bytes));
+	if (width) *width = w;
+	if (height) *height = h;
+	return 1;
+}
+
 void sphynx_player_set_pad(SphynxPlayerHandle *p, unsigned buttons,
                            float lx, float ly, float rx, float ry) {
 	if (!p) return;
