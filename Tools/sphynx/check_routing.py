@@ -245,8 +245,10 @@ def main(root: str) -> int:
             problems.append("UI/SphynxPlayerScreen.cpp lost the per-core options entry")
         if "sphynx_player_option(" not in text:
             problems.append("UI/SphynxPlayerScreen.cpp does not read the core's options")
-        if "int budget = 2;" not in text:
-            problems.append("UI/SphynxPlayerScreen.cpp runs more than two core frames per display frame again")
+        # Pacing moved to the emulation thread in stage 14: there it is the
+        # frame_time wait in PlayerWorker. Guard that instead of the old budget.
+        if "int budget = 2;" in text:
+            problems.append("UI/SphynxPlayerScreen.cpp still runs core frames inline (stage 14 moved them to a thread)")
     env_cb = repo / "extcores" / "src" / "env_callback.cpp"
     if env_cb.exists():
         text = env_cb.read_text(encoding="utf-8", errors="surrogateescape")
