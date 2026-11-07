@@ -240,9 +240,9 @@ void EmuScreen::bootGame(const Path &filename) {
 	// until we know the file is either a PSP game or already handled.
 	if (!sphynxRouted_) {
 		sphynxRouted_ = true;
-		if (SphynxRouteBootFailure(filename)) {
+		if (SphynxRouteBootFailure(screenManager(), filename)) {
+			// The player screen has already replaced this one.
 			bootPending_ = false;
-			screenManager()->switchScreen(new MainScreen());
 			return;
 		}
 	}
@@ -1220,8 +1220,7 @@ void EmuScreen::update() {
 	// it belongs to another system: open the player instead of the error.
 	if (sphynxBootFailed_) {
 		sphynxBootFailed_ = false;
-		if (SphynxRouteBootFailure(gamePath_)) {
-			screenManager()->switchScreen(new MainScreen());
+		if (SphynxRouteBootFailure(screenManager(), gamePath_)) {
 			return;
 		}
 	}

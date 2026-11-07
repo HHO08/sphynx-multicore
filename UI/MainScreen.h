@@ -49,7 +49,7 @@ bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path);
 // SPHYNX: same, but called after the PSP loader already refused the file:
 // anything that is not a PSP disc by extension is handed to the player instead
 // of showing "Failed initializing CPU or memory".
-bool SphynxRouteBootFailure(const Path &path);
+bool SphynxRouteBootFailure(ScreenManager *screenManager, const Path &path);
 
 class GameBrowser : public UI::LinearLayout {
 public:

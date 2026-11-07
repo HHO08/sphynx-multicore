@@ -103,9 +103,9 @@ def main(root: str) -> int:
     emu = (repo / "UI" / "EmuScreen.cpp").read_text(encoding="utf-8", errors="surrogateescape")
     if "sphynxBootFailed_" not in emu:
         problems.append("UI/EmuScreen.cpp lost the boot-failure flag")
-    if "SphynxRouteBootFailure(gamePath_)" not in emu:
+    if "SphynxRouteBootFailure(screenManager(), gamePath_)" not in emu:
         problems.append("UI/EmuScreen.cpp lost the second-chance routing")
-    if "SphynxRouteBootFailure(filename)" not in emu:
+    if "SphynxRouteBootFailure(screenManager(), filename)" not in emu:
         problems.append("UI/EmuScreen.cpp no longer guards bootGame() before the PSP core")
     if "sphynx_ui_is_known_extension" not in main_screen:
         problems.append("UI/MainScreen.cpp does not fall back to the extension table")
@@ -114,7 +114,7 @@ def main(root: str) -> int:
     gamescreen = (repo / "UI" / "GameScreen.cpp").read_text(encoding="utf-8", errors="surrogateescape")
     if "sphynxChecked_" not in gamescreen:
         problems.append("UI/GameScreen.cpp does not route when the game sheet opens")
-    if "bool SphynxRouteBootFailure(const Path &path) {" not in main_screen:
+    if "bool SphynxRouteBootFailure(ScreenManager *screenManager, const Path &path) {" not in main_screen:
         problems.append("UI/MainScreen.cpp does not define SphynxRouteBootFailure()")
     if "sphynx_ui_launch_player" not in main_screen:
         problems.append("UI/MainScreen.cpp does not open the player from native code")
@@ -132,7 +132,26 @@ def main(root: str) -> int:
     if not activity.exists() or "ensureBiosTree" not in activity.read_text(encoding="utf-8", errors="surrogateescape"):
         problems.append("NativeActivity.java does not create the BIOS tree at start-up")
 
-    # 5. the player really offers Save state / Load state / Settings
+    # 5. Stage 9: the player is a PPSSPP screen, and it must keep using
+    # PPSSPP's own pad and menu instead of drawing its own.
+    screen = repo / "UI" / "SphynxPlayerScreen.cpp"
+    if not screen.exists():
+        problems.append("UI/SphynxPlayerScreen.cpp is missing")
+    else:
+        text = screen.read_text(encoding="utf-8", errors="surrogateescape")
+        if "CreatePadLayout(" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not use PPSSPP's own touch pad")
+        for needed in ("\"Save state\"", "\"Load state\"", "pa->T(\"Settings\")"):
+            if needed not in text:
+                problems.append(f"UI/SphynxPlayerScreen.cpp lost the {needed} entry")
+        if "GameSettingsScreen" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not open PPSSPP's settings screen")
+        if "sphynx_player_" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not talk to the player core")
+    if "new SphynxPlayerScreen(" not in main_screen:
+        problems.append("UI/MainScreen.cpp no longer opens the player screen")
+    if "new MainScreen()" not in screen.read_text(encoding="utf-8", errors="surrogateescape") if screen.exists() else False:
+        problems.append("UI/SphynxPlayerScreen.cpp does not return to the game list on exit")
     player = repo / "android" / "src" / "org" / "sphynx" / "emulator" / "SphynxPlayerActivity.java"
     if not player.exists():
         problems.append("SphynxPlayerActivity.java is missing")

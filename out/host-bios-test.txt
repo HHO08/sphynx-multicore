@@ -1,5 +1,5 @@
 Sphynx BIOS/state test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
-workspace: /tmp/sphynx_bios_oicCyu
+workspace: /tmp/sphynx_bios_QnkNzX
 
 [BIOS registry]
   ok    exactly 16 systems have a BIOS folder

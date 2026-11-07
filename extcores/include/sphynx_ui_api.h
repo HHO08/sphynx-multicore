@@ -33,6 +33,12 @@ SPHYNX_UI_EXPORT void sphynx_ui_set_paths_and_vm(const char *native_library_dir,
 SPHYNX_UI_EXPORT void sphynx_ui_set_paths(const char *native_library_dir, const char *system_dir,
                          const char *save_dir);
 
+// The same three directories, read back. Used by the player core so it never
+// keeps a second copy that could disagree with the game list.
+SPHYNX_UI_EXPORT const char *sphynx_ui_native_lib_dir(void);
+SPHYNX_UI_EXPORT const char *sphynx_ui_system_dir(void);
+SPHYNX_UI_EXPORT const char *sphynx_ui_save_dir(void);
+
 // 1 = this file belongs to an external system (Sphynx must play it),
 // 0 = leave it to PPSSPP's own core (PSP games), -1 = unknown content.
 SPHYNX_UI_EXPORT int sphynx_ui_is_external(const char *path);

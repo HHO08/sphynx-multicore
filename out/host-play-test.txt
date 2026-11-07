@@ -1,10 +1,10 @@
 Sphynx play test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
-workspace: /tmp/sphynx_play_yPd1Px
+workspace: /tmp/sphynx_play_ZNjTEw
 [1] Android URI -> file resolution
   PASS document id extracted from a tree URI
   PASS document id decoded (id=primary:PSP/GAME/Ys III (USA).sfc)
   PASS document id mapped
-  PASS primary: volume maps to emulated/0 (got /tmp/sphynx_play_yPd1Px/storage/emulated/0/PSP/GAME/Ys III (USA).sfc)
+  PASS primary: volume maps to emulated/0 (got /tmp/sphynx_play_ZNjTEw/storage/emulated/0/PSP/GAME/Ys III (USA).sfc)
   PASS raw: document id maps through
   PASS SD-card volume maps to its UUID mount
   PASS Downloads/media ids are reported as unmappable (they need a copy)

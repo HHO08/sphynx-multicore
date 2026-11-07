@@ -292,6 +292,13 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	return 1;
 }
 
+// The directories Java handed us at start-up. The player (player_core.cpp)
+// needs them to find the cores, the BIOS folders and the save files, and it
+// must not keep a second copy of them that could drift.
+const char *sphynx_ui_native_lib_dir(void) { return g_native_lib_dir.c_str(); }
+const char *sphynx_ui_system_dir(void) { return g_system_dir.c_str(); }
+const char *sphynx_ui_save_dir(void) { return g_save_dir.c_str(); }
+
 void sphynx_ui_free(void *p) { std::free(p); }
 
 char *sphynx_ui_local_path(const char *path) {

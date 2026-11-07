@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.5
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.6
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -137,7 +137,15 @@ jobs:
               extcores/jni/sphynx_launch_jni.cpp \
               extcores/src/android_paths.cpp extcores/src/ui_api.cpp \
               extcores/src/bios_layout.cpp extcores/src/state_file.cpp \
-              extcores/src/diag_log.cpp
+              extcores/src/diag_log.cpp extcores/src/player_core.cpp \
+              extcores/src/player_audio.cpp
+
+          # Stage 9: the player core that PPSSPP's own screen drives. It has no
+          # host test (it needs a core to run), but it must at least compile
+          # with the same flags the portable layer uses.
+          g++ -std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter \
+              -Iextcores/include -Iextcores/src \
+              extcores/src/player_core.cpp extcores/src/player_audio.cpp
 
           # Stage 6: every game launch path must go through SphynxRouteExternal().
           # This is the static guard for the "Failed initializing CPU or memory"

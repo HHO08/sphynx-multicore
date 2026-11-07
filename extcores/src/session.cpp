@@ -133,6 +133,9 @@ bool Session::Start(const std::string &core_path, const std::string &content_pat
 		if (loader_.sym->get_system_av_info) {
 			loader_.sym->get_system_av_info(&av);
 			if (av.timing.sample_rate > 1000.0) sample_rate_ = av.timing.sample_rate;
+			// A PAL core reports 50.0, an NTSC one 59.94. Values outside a sane
+			// range are ignored so a broken core cannot make the pacer insane.
+			if (av.timing.fps > 20.0 && av.timing.fps < 200.0) frame_rate_ = av.timing.fps;
 		}
 	}
 
@@ -177,6 +180,12 @@ void Session::Stop() {
 	tls_audio = nullptr;
 	tls_input = nullptr;
 	tls_env = nullptr;
+}
+
+void *Session::MemoryData(unsigned id, size_t *size) {
+	if (!loader_.sym || !loader_.sym->get_memory_data) return nullptr;
+	if (size) *size = loader_.sym->get_memory_size ? loader_.sym->get_memory_size(id) : 0;
+	return loader_.sym->get_memory_data(id);
 }
 
 size_t Session::StateSize() const {

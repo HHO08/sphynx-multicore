@@ -318,6 +318,14 @@ public:
 	const SessionStats &Stats() const { return stats_; }
 	// Sample rate advertised by the core (Hz). Valid after Start().
 	double SampleRate() const { return sample_rate_; }
+	// Frame rate advertised by the core (Hz). Valid after Start(). The player
+	// screen paces retro_run() with this, so a 50 Hz PAL title does not run 20%
+	// too fast just because the UI happens to tick at 60 Hz.
+	double FrameRate() const { return frame_rate_; }
+	// Battery-backed memory (libretro RETRO_MEMORY_SAVE_RAM). The player copies
+	// this to disk so in-game saves survive closing the app. nullptr when the
+	// core has none.
+	void *MemoryData(unsigned id, size_t *size);
 	const Environment &Env() const { return env_; }
 	bool LastRunFailed() const { return last_run_failed_; }
 	const char *LastError() const { return error_.c_str(); }
@@ -335,6 +343,7 @@ private:
 	bool last_run_failed_ = false;
 	int watchdog_ms_ = 3000;
 	double sample_rate_ = 44100.0;
+	double frame_rate_ = 60.0;
 };
 
 // ---------------------------------------------------------------------------

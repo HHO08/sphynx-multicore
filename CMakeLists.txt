@@ -1525,6 +1525,11 @@ list(APPEND NativeAppSource
 	UI/DisplayLayoutScreen.h
 	UI/EmuScreen.h
 	UI/EmuScreen.cpp
+	# SPHYNX: the player screen for the 35 external systems. A normal PPSSPP
+	# screen, so the touch pad, the pause menu and the settings screens are the
+	# ones PPSSPP already ships.
+	UI/SphynxPlayerScreen.h
+	UI/SphynxPlayerScreen.cpp
 	UI/GameInfoCache.h
 	UI/GameInfoCache.cpp
 	UI/MainScreen.h

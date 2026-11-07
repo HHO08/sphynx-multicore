@@ -82,6 +82,12 @@ def main(root: str) -> int:
         scanned += 1
         for start, end in extern_c_blocks(text):
             for offset, line in enumerate(text[start:end].splitlines(), start=1):
+                # Every function inside an extern "C" block is written at column
+                # 0. An indented line is part of a body, where C++ types are
+                # completely legal - stage 9's player_core.cpp builds a
+                # std::unique_ptr on the first line of an exported function.
+                if line[:1] in (" ", "\t"):
+                    continue
                 if not CPP_TYPES.match(line):
                     continue
                 if not FUNC_LINE.match(line):

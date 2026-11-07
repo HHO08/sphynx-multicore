@@ -29,6 +29,11 @@ set(SPHYNX_EXTCORE_SOURCES
 	src/state_file.cpp
 	# Flight recorder: PSP/sphynx_log.txt.
 	src/diag_log.cpp
+	# Stage 9: the player that PPSSPP's own screen drives (see
+	# sphynx_player_api.h). No GL, no window, no Activity: it only runs the
+	# core and hands pixels, sound and save states to the UI.
+	src/player_core.cpp
+	src/player_audio.cpp
 )
 
 # JNI bridge is only meaningful on Android; it compiles to stubs elsewhere.
@@ -66,6 +71,11 @@ if(SPHYNX_JNI)
 	endif()
 	if(SPHYNX_EGL_LIB)
 		target_link_libraries(sphynx_extcore PRIVATE ${SPHYNX_EGL_LIB})
+	endif()
+	# Sound for the external systems (player_audio.cpp).
+	find_library(SPHYNX_OPENSL_LIB OpenSLES)
+	if(SPHYNX_OPENSL_LIB)
+		target_link_libraries(sphynx_extcore PRIVATE ${SPHYNX_OPENSL_LIB})
 	endif()
 	# liblog for the Android log, libdl for dlopen() of the cores.
 	find_library(SPHYNX_LOG_LIB log)
