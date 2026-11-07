@@ -48,9 +48,10 @@ void CbVideo(const void *data, unsigned width, unsigned height, size_t pitch) {
 }
 
 void CbAudioSample(int16_t left, int16_t right) {
-	if (!tls_audio) return;
-	const int16_t pair[2] = {left, right};
-	tls_audio->OnAudio(pair, 1);
+	if (!tls_session) return;
+	// SPHYNX (stage 15 audio): staged on the core thread and handed to the audio
+	// queue once per frame, instead of one lock + one ring write per sample.
+	tls_session->QueueAudioSample(left, right);
 }
 
 size_t CbAudioBatch(const int16_t *data, size_t frames) {
@@ -143,10 +144,29 @@ bool Session::Start(const std::string &core_path, const std::string &content_pat
 	return true;
 }
 
+void Session::QueueAudioSample(int16_t left, int16_t right) {
+	audio_stage_.push_back(left);
+	audio_stage_.push_back(right);
+}
+
+void Session::FlushAudioStage() {
+	if (audio_stage_.empty()) return;
+	if (audio_sink_ && running_) {
+		const size_t frames = audio_stage_.size() / 2;
+		audio_sink_->OnAudio(audio_stage_.data(), frames);
+		stats_.audio_frames += frames;
+	}
+	// Kept, not freed: the buffer is reused for the next frame, so a 60 Hz game
+	// does not allocate 60 times a second.
+	audio_stage_.clear();
+}
+
 bool Session::RunFrame() {
 	if (!running_ || !loader_.sym) return false;
 	const auto t0 = Clock::now();
 	loader_.sym->run();
+	// Everything the core produced for this frame reaches the device here.
+	FlushAudioStage();
 	const double ms = MsSince(t0);
 	stats_.frames++;
 	stats_.last_frame_ms = ms;
@@ -170,6 +190,7 @@ void Session::Stop() {
 		return;
 	}
 	running_ = false;
+	audio_stage_.clear();   // nothing left worth playing
 	if (loader_.sym) {
 		loader_.sym->unload_game();
 		loader_.sym->deinit();

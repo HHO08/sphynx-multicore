@@ -443,7 +443,10 @@ bool SelfCheck(std::string *report) {
 
 const char *BuildId() {
 	// Static storage: the caller may keep the pointer for the process lifetime.
-	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI ") +
+	// SPHYNX (stage 15): the stage number is part of the string on purpose - a
+	// screenshot of the failure panel then names the build exactly, which is how
+	// a screenshot from a device becomes a usable bug report.
+	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage15 (core settings+audio clock+bios names, libretro ABI ") +
 	                        std::to_string(RETRO_API_VERSION) + ")";
 	return id.c_str();
 }

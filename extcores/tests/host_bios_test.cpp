@@ -236,6 +236,67 @@ void TestMissingAndAdoption() {
 }
 
 // ---------------------------------------------------------------------------
+//  1b. BIOS file *names*: the white-screen case (stage 15)
+//
+//  A core opens "bios7.bin" with a case-sensitive fopen(). A user who copies
+//  "BIOS7.BIN" or "nds_bios7.bin" into the Nintendo DS folder had the files in
+//  the right place and the core still could not see them - two white screens.
+//  These checks are the fix, measured.
+// ---------------------------------------------------------------------------
+void TestBiosFileNames() {
+	std::printf("\n[BIOS file names a core can really open (stage 15)]\n");
+	const std::string memstick = g_root + "/memstick";
+	sphynx::EnsureBiosTree(memstick, nullptr);
+	const std::string nds = sphynx::BiosDirForSystem(memstick, "nds");
+	Check(IsDir(nds), "the Nintendo DS folder exists");
+
+	// A wrong-case name and a system-prefixed one, exactly like a real dump set.
+	WriteFile(nds + "/BIOS7.BIN", std::string(16 * 1024, '7'));
+	WriteFile(nds + "/NDS_Firmware.bin", std::string(256 * 1024, 'F'));
+
+	std::string report;
+	const int fixed = sphynx::NormalizeBiosNames(memstick, &report);
+	Check(fixed == 2, "two names were corrected");
+	Check(Exists(nds + "/bios7.bin"), "BIOS7.BIN becomes bios7.bin");
+	Check(Exists(nds + "/firmware.bin"), "NDS_Firmware.bin becomes firmware.bin");
+	Check(!Exists(nds + "/BIOS7.BIN"), "the wrong-cased name is gone: renamed, not duplicated");
+	Check(report.find("bios7.bin") != std::string::npos, "the correction is listed in the report");
+
+	// The reports now agree with reality: two present, one missing.
+	const std::string missing = sphynx::MissingBiosFiles(memstick, "nds");
+	Check(missing.find("bios9.bin") != std::string::npos, "bios9.bin is still reported missing");
+	Check(missing.find("bios7.bin") == std::string::npos, "but bios7.bin is not");
+	const std::string status = sphynx::BiosReport(memstick, "nds");
+	Check(status.find("Nintendo DS") != std::string::npos, "the report names the folder");
+	Check(status.find("bios7.bin (16 KiB)") != std::string::npos, "and shows what it found, with its size");
+	Check(status.find("missing: bios9.bin") != std::string::npos, "and exactly what is missing");
+
+	// Discipline: a name that merely ends with the same letters is NOT adopted,
+	// because adopting the wrong file would be worse than reporting it missing.
+	WriteFile(nds + "/neobios9.bin", "NOT-A-DS-BIOS");
+	Check(!Exists(nds + "/bios9.bin"), "an unrelated file is not mistaken for the BIOS");
+	Check(sphynx::MissingBiosFiles(memstick, "nds").find("bios9.bin") != std::string::npos,
+	      "and it stays reported as missing");
+
+	// An exact name is never touched, and running the pass twice changes nothing.
+	WriteFile(nds + "/bios9.bin", std::string(4 * 1024, '9'));
+	Check(sphynx::NormalizeBiosNames(memstick, &report) == 0, "a correctly named set is left alone");
+	Check(sphynx::MissingBiosFiles(memstick, "nds").empty(), "the DS BIOS set is now complete");
+
+	// Adoption from PSP/SYSTEM is also name-tolerant, and lands under the exact
+	// name: this is how files a user already had start working.
+	MkDirs(memstick + "/SYSTEM");
+	WriteFile(memstick + "/SYSTEM/Disksys.ROM", std::string(8 * 1024, 'D'));
+	const int adopted = sphynx::AdoptLegacyBios(memstick, &report);
+	Check(adopted >= 1, "a wrong-cased file in PSP/SYSTEM is adopted");
+	Check(Exists(sphynx::BiosDirForSystem(memstick, "fds") + "/disksys.rom"),
+	      "and it arrives with the exact name the Famicom Disk System core opens");
+
+	// A system with no BIOS folder must not be invented by any of this.
+	Check(sphynx::BiosDirForSystem(memstick, "nes").empty(), "a system without BIOS still gets no folder");
+}
+
+// ---------------------------------------------------------------------------
 //  2. The C surface PPSSPP's UI and Java use
 // ---------------------------------------------------------------------------
 void TestUiApi() {
@@ -366,6 +427,7 @@ int main() {
 	TestRegistry();
 	TestTreeCreation();
 	TestMissingAndAdoption();
+	TestBiosFileNames();
 	TestUiApi();
 	TestSaveStates();
 	TestDiagLog();

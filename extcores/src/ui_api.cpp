@@ -392,6 +392,38 @@ char *sphynx_ui_bios_dir_for_system(const char *system_key) {
 	return out;
 }
 
+void sphynx_ui_prepare_bios(const char *system_key) {
+	if (g_memstick_dir.empty()) {
+		// No memstick folder known (a Storage-Access-Framework setup that never
+		// announced itself): the core still gets PPSSPP's SYSTEM folder, and the
+		// log says so instead of pretending the BIOS was checked.
+		sphynx::LogLine("bios: no memstick folder is known, cannot prepare the system folder");
+		return;
+	}
+	std::string report;
+	sphynx::EnsureBiosTree(g_memstick_dir, &report);
+	std::string adopted_report;
+	sphynx::AdoptLegacyBios(g_memstick_dir, &adopted_report);
+	if (!adopted_report.empty()) sphynx::LogLine("bios: adopted" + adopted_report);
+
+	// The load-bearing step: exact names.
+	std::string fixed_report;
+	const int fixed = sphynx::NormalizeBiosNames(g_memstick_dir, &fixed_report);
+	if (fixed > 0) {
+		sphynx::Logf("bios: %d file name(s) corrected so the core can open them", fixed);
+		sphynx::LogLine(fixed_report);
+	}
+	(void)system_key;   // the whole tree is normalised, not just one folder
+}
+
+char *sphynx_ui_bios_report(const char *system_key) {
+	const std::string report = sphynx::BiosReport(g_memstick_dir, system_key);
+	char *out = static_cast<char *>(std::malloc(report.size() + 1));
+	if (!out) return nullptr;
+	std::memcpy(out, report.c_str(), report.size() + 1);
+	return out;
+}
+
 char *sphynx_ui_bios_missing(const char *system_key) {
 	const std::string missing = sphynx::MissingBiosFiles(g_memstick_dir, system_key);
 	char *out = static_cast<char *>(std::malloc(missing.size() + 1));

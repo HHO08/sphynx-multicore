@@ -106,6 +106,19 @@ SPHYNX_UI_EXPORT char *sphynx_ui_bios_missing(const char *system_key);
 // "complete" / "missing x, y" / "no BIOS needed".
 SPHYNX_UI_EXPORT const char *sphynx_ui_bios_status(const char *system_key);
 
+// SPHYNX (stage 15): called right before a core is loaded. Recreates the tree,
+// adopts anything new from PSP/SYSTEM, and — the part that was missing — gives
+// every expected BIOS file the exact, lower-case name the core's fopen() uses,
+// so "BIOS7.BIN" or "nds_bios7.bin" sitting in the folder finally counts as a
+// BIOS instead of being invisible. Deletes nothing.
+SPHYNX_UI_EXPORT void sphynx_ui_prepare_bios(const char *system_key);
+
+// Detailed per-file state of one system's folder, e.g.
+//   "nds · /…/SYSTEMS_BIOS/Nintendo DS · found: firmware.bin (256 KiB) ·
+//    missing: bios7.bin, bios9.bin"
+// malloc'd string; free with sphynx_ui_free(). Never NULL.
+SPHYNX_UI_EXPORT char *sphynx_ui_bios_report(const char *system_key);
+
 // ---------------------------------------------------------------------------
 // Opening the player screen
 // ---------------------------------------------------------------------------

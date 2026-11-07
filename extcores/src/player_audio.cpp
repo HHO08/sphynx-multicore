@@ -156,6 +156,15 @@ public:
 
 	bool IsRunning() const override { return running_; }
 
+	// Stereo frames waiting in the ring: half the samples are already handed to
+	// the device, so this is what the emulation thread must not run ahead of.
+	size_t BufferedFrames() const override {
+		std::lock_guard<std::mutex> lock(mutex_);
+		const size_t capacity = ring_.size();
+		if (capacity == 0) return 0;
+		return ((write_ + capacity - read_) % capacity) / 2;
+	}
+
 private:
 	static void BqCallback(SLAndroidSimpleBufferQueueItf bq, void *ctx) {
 		static_cast<OpenSLAudio *>(ctx)->OnBufferDone(bq);
@@ -168,6 +177,8 @@ private:
 		Fill(buffers_[index]);
 		(*bq)->Enqueue(bq, buffers_[index].data(), buffers_[index].size() * sizeof(int16_t));
 	}
+
+	size_t Underruns() const { return underruns_; }
 
 	// Pull as much as the ring holds, pad the rest with silence.
 	void Fill(std::vector<int16_t> &dst) {
@@ -184,6 +195,9 @@ private:
 			// Underrun: hold the last sample instead of snapping to silence. A
 			// step to zero in the middle of a waveform is exactly the click that
 			// was audible; holding the level is inaudible at this length.
+			// SPHYNX (stage 15): counted, and the count is readable through
+			// Underruns(), so "the sound crackles" can be checked instead of
+			// argued about.
 			++underruns_;
 			const int16_t last_l = copied > 1 ? dst[copied - 2] : last_l_;
 			const int16_t last_r = copied > 0 ? dst[copied - 1] : last_r_;
@@ -212,7 +226,8 @@ private:
 	std::vector<int16_t> buffers_[kBufferCount];
 	std::vector<int16_t> ring_;
 	size_t read_ = 0, write_ = 0;
-	std::mutex mutex_;
+	// mutable: BufferedFrames() is const but must still read the ring safely.
+	mutable std::mutex mutex_;
 	volatile bool running_ = false;
 	// Last delivered sample, used to bridge an underrun without a click.
 	int16_t last_l_ = 0;

@@ -79,7 +79,7 @@ const BiosSystem kSystems[] = {
 	{"dreamcast", "Dreamcast", kDreamcastFiles, 2, false,
 	 "Optional: the built-in replacement BIOS works, but the real one fixes boot and logo problems."},
 	{"nds", "Nintendo DS", kNdsFiles, 3, false,
-	 "Optional: without firmware a few games refuse to boot. bios7/bios9/firmware belong together."},
+	 "bios7.bin + bios9.bin + firmware.bin belong together: the DS needs all three, and without them it shows two white screens. A game can start without them, but almost none runs.", true},
 	{"msx", "MSX", kMsxFiles, 4, false,
 	 "Optional: the built-in C-BIOS only runs a handful of games; the real ROM set runs almost all."},
 	{"sms", "Master System", kMasterSystemFiles, 1, false,
@@ -92,6 +92,11 @@ std::string JoinPath(const std::string &a, const std::string &b) {
 	if (a.empty()) return b;
 	if (a.back() == '/') return a + b;
 	return a + "/" + b;
+}
+
+std::string BaseName(const std::string &path) {
+	const size_t slash = path.find_last_of('/');
+	return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 }  // namespace
@@ -172,6 +177,83 @@ bool CopyIfMissing(const std::string &from, const std::string &to) {
 	std::fclose(out);
 	if (!ok) ::remove(to.c_str());
 	return ok;
+}
+
+// --- case- and alias-tolerant file lookup (stage 15) -----------------------
+//
+// A core opens its BIOS with fopen("bios7.bin"), which is case sensitive on
+// Android. The files were therefore "in the folder" and still invisible to the
+// core: the Nintendo DS booted to two white screens with a full BIOS set in
+// place. Everything below looks a file up the way a person means it, and the
+// caller then gives it the exact name the core wants.
+std::string Lowered(const std::string &in) {
+	std::string out;
+	out.reserve(in.size());
+	for (char c : in) out.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
+	return out;
+}
+
+bool IsNameSeparator(char c) {
+	return c == '_' || c == '-' || c == '.' || c == ' ';
+}
+
+// True when `file` is the file `expected` means:
+//   * the same name in any case ("BIOS7.BIN" == "bios7.bin"), or
+//   * the same name behind a system prefix ("nds_bios7.bin", "NDS-Bios7.bin").
+// A name that merely *ends* with the same letters without a separator
+// ("neobios.rom" vs "bios.rom") is deliberately NOT a match: adopting the wrong
+// file would be worse than reporting it missing.
+bool NameMatches(const std::string &file, const std::string &expected) {
+	const std::string f = Lowered(file);
+	const std::string e = Lowered(expected);
+	if (f == e) return true;
+	if (f.size() <= e.size()) return false;
+	if (f.compare(f.size() - e.size(), e.size(), e) != 0) return false;
+	return IsNameSeparator(f[f.size() - e.size() - 1]);
+}
+
+std::vector<std::string> ReadDirNames(const std::string &dir) {
+	std::vector<std::string> names;
+	DIR *d = ::opendir(dir.c_str());
+	if (!d) return names;
+	while (struct dirent *entry = ::readdir(d)) {
+		const std::string name = entry->d_name;
+		if (name == "." || name == "..") continue;
+		names.push_back(name);
+	}
+	::closedir(d);
+	return names;
+}
+
+// Full path of the file `expected` inside `dir`, matching loosely, or "".
+std::string FindLoose(const std::string &dir, const char *expected) {
+	if (dir.empty() || !expected || !*expected) return std::string();
+	for (const std::string &name : ReadDirNames(dir)) {
+		if (!NameMatches(name, expected)) continue;
+		const std::string path = JoinPath(dir, name);
+		if (FileExists(path)) return path;   // a directory with that name is not it
+	}
+	return std::string();
+}
+
+long long FileSizeOf(const std::string &path) {
+	struct stat st;
+	if (::stat(path.c_str(), &st) != 0) return -1;
+	return static_cast<long long>(st.st_size);
+}
+
+// "16 KiB" / "256 KiB" / "1.2 MiB": a BIOS dump has a known size, and seeing it
+// is how a user notices that a 0-byte or truncated file was copied.
+std::string HumanSize(long long bytes) {
+	if (bytes < 0) return "?";
+	char buf[48];
+	if (bytes < 1024)
+		std::snprintf(buf, sizeof(buf), "%lld B", bytes);
+	else if (bytes < 1024 * 1024)
+		std::snprintf(buf, sizeof(buf), "%lld KiB", (bytes + 512) / 1024);
+	else
+		std::snprintf(buf, sizeof(buf), "%.1f MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+	return buf;
 }
 
 std::string FileList(const BiosSystem &s) {
@@ -346,7 +428,11 @@ int AdoptLegacyBios(const std::string &memstick_dir, std::string *report) {
 			if (FileExists(dst)) continue;
 			for (const std::string &src_dir : sources) {
 				if (src_dir == dst_dir) continue;   // never copy onto itself
-				const std::string src = JoinPath(src_dir, s.files[i]);
+				// SPHYNX (stage 15): the source may be "BIOS7.BIN" or
+				// "nds_bios7.bin"; it is adopted under the exact name the core
+				// opens, so a file that was already on the card starts working
+				// instead of being reported as missing.
+				const std::string src = FindLoose(src_dir, s.files[i]);
 				if (CopyIfMissing(src, dst)) {
 					++adopted;
 					detail += "  ";
@@ -375,18 +461,85 @@ std::string MissingBiosFilesInDir(const std::string &dir, const char *system_key
 	std::string missing;
 	bool any_present = false;
 	for (int i = 0; i < s->file_count; ++i) {
-		if (FileExists(JoinPath(dir, s->files[i]))) {
+		// SPHYNX (stage 15): "present" means the file the user put there, even
+		// when the capital letters differ - NormalizeBiosNames() then gives it
+		// the exact name the core opens, so the two answers agree.
+		if (!FindLoose(dir, s->files[i]).empty()) {
 			any_present = true;
 			continue;
 		}
 		if (!missing.empty()) missing += ", ";
 		missing += s->files[i];
 	}
-	// Several BIOS files of a system are alternatives (regions, revisions):
-	// finding ONE of them is enough, so only report "missing" when the folder
-	// holds none of them.
+	// Several BIOS files of a system are usually alternatives (regions,
+	// revisions): finding ONE of them is enough, so only report "missing" when
+	// the folder holds none of them.
+	// SPHYNX (stage 15): the Nintendo DS is not like that - bios7, bios9 and
+	// firmware are three different parts and all are required. Reporting it as
+	// complete because one was present is how "the BIOS is installed and it is
+	// still white" happened.
+	if (s->all_required) return missing;
 	if (any_present) return std::string();
 	return missing;
+}
+
+int NormalizeBiosNames(const std::string &memstick_dir, std::string *report) {
+	int fixed = 0;
+	std::string detail;
+	for (const BiosSystem &s : kSystems) {
+		const std::string dir = BiosDirForSystem(memstick_dir, s.system_key);
+		if (dir.empty() || !DirectoryExists(dir)) continue;
+		for (int i = 0; i < s.file_count; ++i) {
+			const std::string want = s.files[i];
+			const std::string dst = JoinPath(dir, want);
+			if (FileExists(dst)) continue;            // already exactly right
+			const std::string src = FindLoose(dir, s.files[i]);
+			if (src.empty() || src == dst) continue;  // nothing to correct
+			// Rename keeps the user's single copy; if the filesystem refuses
+			// (a read-only card, an odd provider) a copy of the same bytes is
+			// just as good and the original stays where it was.
+			bool ok = ::rename(src.c_str(), dst.c_str()) == 0;
+			if (!ok) ok = CopyIfMissing(src, dst);
+			if (!ok) continue;
+			++fixed;
+			detail += "  ";
+			detail += BaseName(src);
+			detail += " -> ";
+			detail += want;
+			detail += "\n";
+		}
+	}
+	if (report) *report = detail;
+	return fixed;
+}
+
+std::string BiosReport(const std::string &memstick_dir, const char *system_key) {
+	const BiosSystem *s = FindBiosSystem(system_key);
+	if (!s) return std::string(system_key ? system_key : "?") + " · no BIOS needed";
+	const std::string dir = BiosDirForSystem(memstick_dir, system_key);
+	std::string out = s->system_key;
+	out += " · ";
+	out += dir.empty() ? "(no folder)" : dir;
+	out += " · ";
+	std::string found, missing;
+	for (int i = 0; i < s->file_count; ++i) {
+		const std::string path = FindLoose(dir, s->files[i]);
+		if (path.empty()) {
+			if (!missing.empty()) missing += ", ";
+			missing += s->files[i];
+			continue;
+		}
+		if (!found.empty()) found += ", ";
+		found += s->files[i];
+		found += " (";
+		found += HumanSize(FileSizeOf(path));
+		found += ")";
+	}
+	out += found.empty() ? "no BIOS file found" : ("found: " + found);
+	if (!missing.empty()) out += " · missing: " + missing;
+	if (!s->mandatory && found.empty())
+		out += " · optional, but this system works far better with it";
+	return out;
 }
 
 std::string BiosStatusForSystem(const std::string &memstick_dir, const char *system_key) {

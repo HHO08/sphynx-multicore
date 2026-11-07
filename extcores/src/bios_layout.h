@@ -44,6 +44,13 @@ struct BiosSystem {
 	// false = it runs without BIOS, but works much better with it
 	bool mandatory = false;
 	const char *note = nullptr;            // one line shown in the README
+	// SPHYNX (stage 15): most systems accept *one* of several dumps - three
+	// PlayStation regions, two Saturn regions, ... - and any single one is
+	// enough. The Nintendo DS is the exception: bios7.bin, bios9.bin and
+	// firmware.bin are three different things that are all needed, and reporting
+	// it as "complete" because one of them was there is what made a white screen
+	// look like a mystery. true = every file is required.
+	bool all_required = false;
 };
 
 // Root folder name, fixed by the request: PSP/SYSTEMS_BIOS
@@ -72,6 +79,24 @@ int EnsureBiosTree(const std::string &memstick_dir, std::string *report);
 // root of <memstick> into the system folders, only when the destination file
 // does not exist yet. Returns how many files were adopted.
 int AdoptLegacyBios(const std::string &memstick_dir, std::string *report);
+
+// SPHYNX (stage 15): a core opens its BIOS with a plain, case-sensitive
+// fopen("<exact name>"). A user who drops "BIOS7.BIN" or "NDS_Bios7.bin" into
+// the folder therefore had the file *right there* and the core still refused to
+// boot (the Nintendo DS white screens). This pass finds such a file and gives it
+// the exact name the core asks for, by renaming it inside its own folder.
+//   * it never touches a file that already has the exact name;
+//   * it never deletes anything: a rename is tried first, a copy second;
+//   * returns how many names were corrected (the report lists them).
+int NormalizeBiosNames(const std::string &memstick_dir, std::string *report);
+
+// One folder + which expected files are really present, with their sizes, e.g.
+//   "nds · .../SYSTEMS_BIOS/Nintendo DS · bios7.bin (16 KiB), firmware.bin
+//    (256 KiB) · missing: bios9.bin"
+// This is what the player shows when a core starts but never draws a picture:
+// it tells "the file is not where the core looks" apart from "the file is
+// there and the core still refuses it".
+std::string BiosReport(const std::string &memstick_dir, const char *system_key);
 
 // Comma separated list of the expected files that are missing ("" = complete).
 // An empty BIOS folder therefore reports every file of that system.

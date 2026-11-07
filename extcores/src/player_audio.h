@@ -29,6 +29,12 @@ public:
 	// Called from the emulation thread with interleaved stereo frames.
 	virtual void Push(const int16_t *frames, size_t frame_count) = 0;
 	virtual bool IsRunning() const = 0;
+	// SPHYNX (stage 15 audio): how much audio is queued right now, in stereo
+	// frames. The emulation thread paces itself against this number, which is
+	// what keeps a 60 Hz game and a 44100 Hz device from slowly drifting apart -
+	// that drift is the slow crackle/pop that shows up a minute into a game.
+	// Backends that cannot report it return 0 and the pacer simply ignores it.
+	virtual size_t BufferedFrames() const { return 0; }
 };
 
 // Returns a backend for this platform. Never null.
