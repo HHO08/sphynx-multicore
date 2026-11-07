@@ -39,7 +39,10 @@
 #include "libretro.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -243,6 +246,33 @@ struct SphynxPlayerHandle {
 	unsigned frame_w = 0, frame_h = 0;
 	uint64_t frames_run = 0;
 	double last_save_check = 0.0;
+
+	// ------------------------------------------------------------------
+	//  The core runs on its own thread (stage 14)
+	//
+	//  Until now retro_run() was called from PPSSPP's UI update, on the same
+	//  thread that draws the buttons and reacts to touches. One slow emulated
+	//  frame therefore froze the whole interface: the picture stuttered, the pad
+	//  felt unresponsive and the audio queue underran (clicks). Every serious
+	//  frontend, including V5, keeps emulation off the UI thread; this is that
+	//  split, done with the smallest possible surface.
+	// ------------------------------------------------------------------
+	std::thread worker;
+	std::atomic<bool> quit{false};
+	std::atomic<bool> paused{false};
+	std::atomic<bool> started{false};
+	std::atomic<bool> failed{false};
+	// Serialises everything that touches the core: the frame loop and the
+	// infrequent save/load/option calls from the UI thread.
+	std::mutex session_mutex;
+	// Start-up handshake: open() waits here until the core is really running.
+	std::mutex start_mutex;
+	std::condition_variable start_cv;
+	std::string start_error;
+	// Measured, not guessed: frames per second the core actually delivers, and
+	// how long one emulated frame takes. Both are shown on screen.
+	std::atomic<double> measured_fps{0.0};
+	std::atomic<double> frame_ms{0.0};
 	// One flattened option line, reused so sphynx_player_option() can return a
 	// const char* without allocating (see sphynx_player_api.h).
 	std::string option_line_cache;
@@ -379,6 +409,139 @@ void SetStatus(SphynxPlayerHandle *p) {
 	p->status = buf;
 }
 
+// ---------------------------------------------------------------------------
+//  The emulation thread
+//
+//  Everything the libretro ABI requires to happen on "the core thread" happens
+//  here: retro_init/retro_load_game (inside Session::Start), retro_run, the
+//  battery-save flush and retro_deinit. The frame pacing mirrors what V5 does -
+//  one emulated frame per display frame - but on a thread of its own, so a slow
+//  frame can never stall PPSSPP's interface or the audio queue.
+// ---------------------------------------------------------------------------
+void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string content,
+                  std::string system_dir) {
+	const std::string save_dir = p->save_dir;
+
+	std::string error;
+	if (!p->session.Start(core_path, content, system_dir, save_dir, &error)) {
+		{
+			std::lock_guard<std::mutex> lock(p->start_mutex);
+			p->start_error = error.empty() ? "the emulator refused this game" : error;
+		}
+		p->failed = true;
+		p->started = true;
+		p->start_cv.notify_all();
+		return;
+	}
+
+	double rate = p->session.FrameRate();
+	if (rate <= 20.0 || rate > 200.0) rate = 60.0;
+	const double frame_time = 1.0 / rate;
+
+	if (!p->audio_out->Start(p->session.SampleRate())) {
+		// Silent playback is a fine outcome; refusing to play is not.
+		sphynx::LogLine("player: audio device could not be opened, continuing silently");
+	}
+
+	// The core's battery RAM is read here, on the core thread, immediately after
+	// the game is loaded and before the user can save anything.
+	LoadBatterySave(p);
+
+	{
+		std::lock_guard<std::mutex> lock(p->start_mutex);
+		p->started = true;
+	}
+	p->start_cv.notify_all();
+
+	using Clock = std::chrono::steady_clock;
+	auto next_frame = Clock::now();
+	auto fps_window = Clock::now();
+	unsigned frames_in_window = 0;
+	double ms_sum = 0.0;
+	unsigned ms_count = 0;
+	double save_timer = 0.0;
+
+	while (!p->quit.load(std::memory_order_relaxed)) {
+		if (p->paused.load(std::memory_order_relaxed)) {
+			// Paused (a menu is open): keep the thread parked and cheap. The audio
+			// queue is left to drain, which is what stops the "menu music keeps
+			// playing one second after the pause" effect.
+			std::this_thread::sleep_for(std::chrono::milliseconds(8));
+			next_frame = Clock::now();
+			fps_window = Clock::now();
+			frames_in_window = 0;
+			continue;
+		}
+
+		// Fast-forward multiplies how many emulated frames one tick runs.
+		const int loops = std::max(1, p->fast_forward.load(std::memory_order_relaxed));
+		for (int i = 0; i < loops && !p->quit.load(std::memory_order_relaxed); ++i) {
+			const auto t0 = Clock::now();
+			bool ok = false;
+			{
+				std::lock_guard<std::mutex> lock(p->session_mutex);
+				ok = p->session.RunFrame();
+				if (ok) ++p->frames_run;
+			}
+			const double ms =
+				std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+			ms_sum += ms;
+			++ms_count;
+			if (!ok) {
+				p->error = p->session.LastError();
+				if (p->error.empty()) p->error = "the emulator stopped";
+				sphynx::LogLine(std::string("player: stopped: ") + p->error);
+				p->failed = true;
+				p->quit = true;
+				break;
+			}
+			// Battery save every 20 s, on this thread (it touches core memory).
+			save_timer += frame_time * loops;
+			if (save_timer > 20.0) {
+				save_timer = 0.0;
+				std::lock_guard<std::mutex> lock(p->session_mutex);
+				FlushBatterySave(p);
+			}
+		}
+
+		++frames_in_window;
+		p->frame_w = static_cast<unsigned>(p->frame.width());
+		p->frame_h = static_cast<unsigned>(p->frame.height());
+
+		const auto now = Clock::now();
+		const double window = std::chrono::duration<double>(now - fps_window).count();
+		if (window >= 0.5) {
+			p->measured_fps = frames_in_window / window;
+			if (ms_count) p->frame_ms = ms_sum / ms_count;
+			frames_in_window = 0;
+			ms_sum = 0.0;
+			ms_count = 0;
+			fps_window = now;
+			SetStatus(p);
+		}
+
+		// Sleep until the next frame is due. A core that is slower than real time
+		// simply never sleeps - it is not our job to drop its frames here.
+		next_frame += std::chrono::duration_cast<Clock::duration>(
+			std::chrono::duration<double>(frame_time * loops));
+		const auto after = Clock::now();
+		if (next_frame > after) {
+			std::this_thread::sleep_until(next_frame);
+		} else if (after - next_frame > std::chrono::milliseconds(250)) {
+			// Too far behind to catch up: resynchronise instead of spinning.
+			next_frame = after;
+		}
+	}
+
+	// Leave cleanly: battery save first, then the core, then the audio device.
+	{
+		std::lock_guard<std::mutex> lock(p->session_mutex);
+		FlushBatterySave(p);
+		p->session.Stop();
+	}
+	if (p->audio_out) p->audio_out->Stop();
+}
+
 }  // namespace
 
 extern "C" {
@@ -493,45 +656,57 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	// moment the declaration arrives.
 	p->session.EnvMutable().SetInitialOptions(LoadOptions(OptionsFilePath(p.get())));
 
-	std::string start_error;
-	if (!p->session.Start(core_path, local, system_dir, p->save_dir, &start_error)) {
-		const std::string message = start_error.empty() ? "the emulator refused this game" : start_error;
-		if (err && err_size) std::snprintf(err, err_size, "%s", message.c_str());
-		sphynx::LogLine(std::string("player: start failed: ") + message);
-		return nullptr;
-	}
-
-	p->fps = p->session.FrameRate();
-	if (p->fps <= 20.0 || p->fps > 200.0) p->fps = 60.0;
-
-	// 5. Battery save next to the states, then audio.
-	//    The path is built through StateFilePath() only to reuse its mkdir -p;
-	//    the file itself is raw save RAM, not a snapshot, so it has its own
-	//    extension and is never parsed by ReadStateFile().
+	// 5. Battery save path first: the worker writes it while it runs.
 	p->sram_path = sphynx::StateFilePath(p->save_dir, p->game_tag + ".sram", 0);
 	{
 		const size_t dot = p->sram_path.find_last_of('.');
 		if (dot != std::string::npos) p->sram_path = p->sram_path.substr(0, dot) + ".srm";
 	}
-	LoadBatterySave(p.get());
 
-	if (!p->audio_out->Start(p->session.SampleRate())) {
-		// Silent is a fine outcome; refusing to play is not.
-		sphynx::LogLine("player: audio device could not be opened, continuing silently");
+	// 6. Start the core on its own thread and wait for the outcome. The wait is
+	//    bounded: a core that never reports back must not hang the UI, and a
+	//    refusal has to arrive as a readable message, not as a dead screen.
+	SphynxPlayerHandle *handle = p.release();
+	{
+		std::unique_lock<std::mutex> lock(handle->start_mutex);
+		handle->worker = std::thread(PlayerWorker, handle, core_path, local, system_dir);
+		if (!handle->start_cv.wait_for(lock, std::chrono::seconds(30),
+		                               [handle] { return handle->started.load(); })) {
+			handle->start_error = "the emulator did not start within 30 seconds";
+			handle->failed = true;
+		}
+	}
+	if (handle->failed.load()) {
+		const std::string message = handle->start_error.empty()
+		                                ? "the emulator refused this game"
+		                                : handle->start_error;
+		if (err && err_size) std::snprintf(err, err_size, "%s", message.c_str());
+		sphynx::LogLine(std::string("player: start failed: ") + message);
+		handle->quit = true;
+		if (handle->worker.joinable()) handle->worker.join();
+		return nullptr;
 	}
 
+	handle->fps = handle->session.FrameRate();
+	if (handle->fps <= 20.0 || handle->fps > 200.0) handle->fps = 60.0;
+
+	// LoadBatterySave() reads core memory, so it happens on the core thread
+	// (inside Session::Start's caller) - see PlayerWorker.
+
 	g_core_active = true;
-	p->status = p->system_name;
-	SetStatus(p.get());
-	sphynx::LogLine("PLAYER: opened " + local + " (" + p->system_key + " / " + p->core_tag + ")");
-	return p.release();
+	handle->status = handle->system_name;
+	SetStatus(handle);
+	sphynx::LogLine("PLAYER: opened " + local + " (" + handle->system_key + " / " + handle->core_tag + ")");
+	return handle;
 }
 
 void sphynx_player_close(SphynxPlayerHandle *p) {
 	if (!p) return;
-	FlushBatterySave(p);
-	if (p->audio_out) p->audio_out->Stop();
-	p->session.Stop();
+	// Ask the emulation thread to leave; it saves the battery RAM and stops the
+	// core and the audio device itself, because those may only be touched from
+	// the thread that started them. Only after it has returned may we delete.
+	p->quit = true;
+	if (p->worker.joinable()) p->worker.join();
 	{
 		std::lock_guard<std::mutex> one_core(g_one_core_mutex);
 		g_core_active = false;
@@ -540,58 +715,27 @@ void sphynx_player_close(SphynxPlayerHandle *p) {
 }
 
 int sphynx_player_run(SphynxPlayerHandle *p) {
+	// SPHYNX (stage 14): the core is driven by its own thread now, so this call
+	// only reports how it is doing. The screen still calls it once per update,
+	// which keeps the UI code unchanged: 1 = running, 0 = paused, -1 = stopped
+	// with a reason in sphynx_player_status().
 	if (!p) return 0;
-	const int loops = p->fast_forward.load(std::memory_order_relaxed);
-	const int count = loops > 0 ? loops : 1;
-	int result = 1;
-	for (int i = 0; i < count; ++i) {
-		if (!p->session.RunFrame()) {
-			p->error = p->session.LastError();
-			if (p->error.empty()) p->error = "the emulator stopped";
-			sphynx::LogLine(std::string("player: stopped: ") + p->error);
-			result = p->session.LastRunFailed() ? -1 : 0;
-			break;
-		}
-		++p->frames_run;
-	}
-	p->frame_w = static_cast<unsigned>(p->frame.width());
-	p->frame_h = static_cast<unsigned>(p->frame.height());
-	if ((p->frames_run % 120) == 0) SetStatus(p);
-
-	// Battery save twice a minute: cheap, and it bounds what a kill can lose.
-	const double now = static_cast<double>(time(nullptr));
-	if (now - p->last_save_check > 20.0) {
-		p->last_save_check = now;
-		FlushBatterySave(p);
-	}
-	return result;
-}
-
-// SPHYNX (core-running system, stage 11): reports the size of the frame waiting
-// in the queue without consuming it, so the caller can make its buffer big
-// enough. Returns 1 when a frame is waiting, 0 when not.
-int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width, int *height) {
-	if (width) *width = 0;
-	if (height) *height = 0;
-	if (!p) return 0;
-	int w = 0, h = 0;
-	p->frame.Peek(&w, &h);
-	if (width) *width = w;
-	if (height) *height = h;
-	return (w > 0 && h > 0) ? 1 : 0;
-}
-
-int sphynx_player_take_frame(SphynxPlayerHandle *p, unsigned char *dst, int dst_size,
-                             int *width, int *height) {
-	if (!p || !dst || dst_size <= 0) return 0;
-	int w = 0, h = 0, bytes = 0;
-	const uint8_t *src = p->frame.Take(&w, &h, &bytes);
-	if (!src || bytes <= 0) return 0;
-	if (bytes > dst_size) return 0;
-	std::memcpy(dst, src, static_cast<size_t>(bytes));
-	if (width) *width = w;
-	if (height) *height = h;
+	if (p->failed.load()) return -1;
+	if (p->paused.load()) return 0;
 	return 1;
+}
+
+void sphynx_player_set_paused(SphynxPlayerHandle *p, int paused) {
+	if (!p) return;
+	p->paused = paused != 0;
+}
+
+double sphynx_player_measured_fps(SphynxPlayerHandle *p) {
+	return p ? p->measured_fps.load() : 0.0;
+}
+
+double sphynx_player_frame_ms(SphynxPlayerHandle *p) {
+	return p ? p->frame_ms.load() : 0.0;
 }
 
 void sphynx_player_set_pad(SphynxPlayerHandle *p, unsigned buttons,
@@ -606,6 +750,8 @@ void sphynx_player_set_pad(SphynxPlayerHandle *p, unsigned buttons,
 
 int sphynx_player_save_state(SphynxPlayerHandle *p, int slot, char *msg, size_t msg_size) {
 	if (!p) return 0;
+	// Serialised with the emulation thread: core memory is not re-entrant.
+	std::lock_guard<std::mutex> lock(p->session_mutex);
 	std::vector<uint8_t> state;
 	if (!p->session.SaveState(&state)) {
 		if (msg && msg_size) std::snprintf(msg, msg_size, "This system cannot save state.");
@@ -624,6 +770,8 @@ int sphynx_player_save_state(SphynxPlayerHandle *p, int slot, char *msg, size_t 
 
 int sphynx_player_load_state(SphynxPlayerHandle *p, int slot, char *msg, size_t msg_size) {
 	if (!p) return 0;
+	// Serialised with the emulation thread: core memory is not re-entrant.
+	std::lock_guard<std::mutex> lock(p->session_mutex);
 	const std::string path = sphynx::StateFilePath(p->save_dir, p->game_tag, slot);
 	std::vector<uint8_t> state;
 	std::string error;
@@ -642,10 +790,15 @@ int sphynx_player_load_state(SphynxPlayerHandle *p, int slot, char *msg, size_t 
 
 int sphynx_player_state_exists(SphynxPlayerHandle *p, int slot) {
 	if (!p) return 0;
+	// Serialised with the emulation thread: core memory is not re-entrant.
+	std::lock_guard<std::mutex> lock(p->session_mutex);
 	return sphynx::StateFileExists(sphynx::StateFilePath(p->save_dir, p->game_tag, slot)) ? 1 : 0;
 }
 
 void sphynx_player_flush_save(SphynxPlayerHandle *p) {
+	if (!p) return;
+	// Serialised with the emulation thread: core memory is not re-entrant.
+	std::lock_guard<std::mutex> lock(p->session_mutex);
 	FlushBatterySave(p);
 }
 
@@ -679,7 +832,10 @@ const char *sphynx_player_option(SphynxPlayerHandle *p, int index) {
 }
 
 int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key, const char *value) {
-	if (!p || !key || !value) return 0;
+	if (!p) return 0;
+	// Serialised with the emulation thread: core memory is not re-entrant.
+	std::lock_guard<std::mutex> lock(p->session_mutex);
+	if (!key || !value) return 0;
 	if (!p->session.EnvMutable().SetOption(key, value)) return 0;
 	SaveOptions(OptionsFilePath(p), p->session.Env().Options());
 	return 1;

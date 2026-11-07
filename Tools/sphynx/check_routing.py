@@ -258,6 +258,22 @@ def main(root: str) -> int:
         if "kPrefillBuffers" not in text:
             problems.append("extcores/src/player_audio.cpp starts the queue dry (audible clicks)")
 
+    #    f) Stage 14: emulation must stay off the UI thread, and the screen must
+    #       park it while a menu is open.
+    if screen.exists():
+        text = screen.read_text(encoding="utf-8", errors="surrogateescape")
+        if "sphynx_player_set_paused" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not pause the emulation thread for its menus")
+        if "sphynx_player_measured_fps" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp no longer reports the measured frame rate")
+    core = repo / "extcores" / "src" / "player_core.cpp"
+    if core.exists():
+        text = core.read_text(encoding="utf-8", errors="surrogateescape")
+        if "std::thread(PlayerWorker" not in text:
+            problems.append("extcores/src/player_core.cpp runs the core on the UI thread again")
+        if "p->worker.join()" not in text:
+            problems.append("extcores/src/player_core.cpp never joins the emulation thread")
+
     #    c) The game must not be stopped by us. The frame-budget watchdog used to
     #       kill CD-based cores on slow phones a few seconds after launch.
     player_core = repo / "extcores" / "src" / "player_core.cpp"

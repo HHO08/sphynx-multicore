@@ -134,6 +134,20 @@ SPHYNX_PLAYER_EXPORT const char *sphynx_player_option(SphynxPlayerHandle *p, int
 SPHYNX_PLAYER_EXPORT int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key,
                                                   const char *value);
 
+// ---------------------------------------------------------------------------
+//  Emulation thread control (stage 14)
+//
+//  The core runs on a thread of its own; these three calls are how the screen
+//  talks to it. Pausing does not destroy anything: the state stays in memory and
+//  the audio queue drains, so opening the pause menu costs nothing and resuming
+//  is instant.
+// ---------------------------------------------------------------------------
+SPHYNX_PLAYER_EXPORT void sphynx_player_set_paused(SphynxPlayerHandle *p, int paused);
+// Frames per second the core actually delivers (measured, not requested).
+SPHYNX_PLAYER_EXPORT double sphynx_player_measured_fps(SphynxPlayerHandle *p);
+// How long one emulated frame takes on this device, in milliseconds.
+SPHYNX_PLAYER_EXPORT double sphynx_player_frame_ms(SphynxPlayerHandle *p);
+
 SPHYNX_PLAYER_EXPORT void sphynx_player_set_sound(SphynxPlayerHandle *p, int on);
 // Fast forward: run up to `multiplier` frames per tick instead of one.
 SPHYNX_PLAYER_EXPORT void sphynx_player_set_fast_forward(SphynxPlayerHandle *p, int multiplier);

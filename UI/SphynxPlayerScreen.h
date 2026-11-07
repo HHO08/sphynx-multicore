@@ -86,6 +86,8 @@ public:
 	bool FastForward() const { return fastForward_; }
 	std::string SystemName();
 	void OpenPauseMenu();
+	// Lets the emulation thread run again after a menu.
+	void ClosePauseMenu();
 	// Writes battery saves right now (called when the menu opens and on exit).
 	void FlushSave();
 
@@ -141,6 +143,9 @@ private:
 	bool padForcedOn_ = false;
 	bool sound_ = true;
 
+	// Last pad state handed to the core; identical states are skipped.
+	unsigned lastPadBits_ = 0;
+	bool lastPadValid_ = false;
 	double lastTime_ = 0.0;
 	double frameDebt_ = 0.0;
 };

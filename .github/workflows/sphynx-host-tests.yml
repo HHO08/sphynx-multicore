@@ -30,7 +30,7 @@ jobs:
               -o out/sphynx_host_smoke \
               extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp \
-              extcores/tests/host_smoke.cpp -ldl
+              extcores/tests/host_smoke.cpp -ldl -pthread
 
       - name: Run host test
         run: ./out/sphynx_host_smoke ./out/libstub_core.so ./out/libbroken_core.so | tee out/report.txt

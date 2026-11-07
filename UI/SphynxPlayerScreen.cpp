@@ -215,7 +215,10 @@ void SphynxPauseScreen::CreateViews() {
 
 	Choice *continueChoice = rightItems->Add(new Choice(pa->T("Continue")));
 	continueChoice->OnClick.Add([this](UI::EventParams &) {
-		// Closing the menu returns focus to the player, which resumes the core.
+		// Closing the menu returns focus to the player, which resumes the core;
+		// resuming explicitly here too keeps it instant even if the focus event
+		// is delayed by a frame.
+		player_->ClosePauseMenu();
 		screenManager()->finishDialog(this, DR_CANCEL);
 		return UI::EVENT_DONE;
 	});
@@ -344,6 +347,9 @@ SphynxPlayerScreen::SphynxPlayerScreen(const Path &gamePath, const std::string &
 }
 
 SphynxPlayerScreen::~SphynxPlayerScreen() {
+	// The screen is going away: the emulation thread is asked to leave by
+	// sphynx_player_close() below, which also saves the battery RAM and stops the
+	// core on that thread. Nothing here touches core memory directly.
 	// Undo the force above, so the rest of the app keeps the user's own setting.
 	if (padForcedOn_) {
 		g_Config.bShowTouchControls = false;
@@ -598,50 +604,30 @@ void SphynxPlayerScreen::OnVirtualKey(int virtualKey, bool down) {
 void SphynxPlayerScreen::RunFrames() {
 	if (!player_) return;
 
-	// A core that runs but never draws looks like a black screen with buttons,
-	// which is indistinguishable from a crash. Say so on screen instead of
-	// guessing - this costs nothing and it is what a bug report needs.
+	// SPHYNX (stage 14): the core has its own thread now, so this function no
+	// longer spends the UI's time inside retro_run(). It only collects the state
+	// the screen needs: the newest pad reading (cheap, once per display frame)
+	// and whether the emulation thread is still alive.
+	UpdatePadState();
+
+	const int state = sphynx_player_run(player_);
+	if (state < 0) {
+		HandleCoreStop(state);
+		return;
+	}
+
+	// "Running but nothing drawn" is worth saying on screen; a black picture is
+	// otherwise indistinguishable from a crash. Measured, not guessed: the core
+	// thread reports both numbers.
 	if (!frameSeen_ && !noFrameWarned_ && startTime_ > 0.0 && time_now_d() - startTime_ > 4.0) {
 		noFrameWarned_ = true;
-		g_OSD.Show(OSDType::MESSAGE_WARNING,
-			std::string("No picture from the core yet — ") + sphynx_player_status(player_), 5.0f);
-		sphynx_ui_log_line((std::string("player screen: no frames after 4 s: ") + sphynx_player_status(player_)).c_str());
+		char why[256];
+		std::snprintf(why, sizeof(why), "No picture yet — %.1f fps, %.1f ms/frame, %s",
+		              sphynx_player_measured_fps(player_), sphynx_player_frame_ms(player_),
+		              sphynx_player_status(player_));
+		g_OSD.Show(OSDType::MESSAGE_WARNING, why, 5.0f);
+		sphynx_ui_log_line((std::string("player screen: no frames after 4 s: ") + why).c_str());
 	}
-
-	const double now = time_now_d();
-	if (lastTime_ == 0.0) lastTime_ = now;
-	double dt = now - lastTime_;
-	lastTime_ = now;
-	// Coming back from the background must not fast-forward through a minute of
-	// gameplay in one burst.
-	if (dt < 0.0) dt = 0.0;
-	if (dt > 0.25) dt = 0.25;
-
-	double fps = sphynx_player_fps(player_);
-	if (fps < 20.0 || fps > 200.0) fps = 60.0;
-	frameDebt_ += dt * fps;
-	if (fastForward_) frameDebt_ += dt * fps * 2.0;   // "fast forward" = 3x total
-
-	// SPHYNX (performance, stage 13): at most two emulated frames per display
-	// frame. The old budget of four tried to "catch up" after a slow frame, which
-	// made the next frame slower still - the usual death spiral, and the reason a
-	// game that ran smoothly felt laggy here. Dropping emulated frames is the
-	// right answer: the picture and the buttons stay responsive.
-	int budget = 2;
-	while (frameDebt_ >= 1.0 && budget-- > 0) {
-		UpdatePadState();
-		controlMapper_.Update(now);
-		const int result = sphynx_player_run(player_);
-		frameDebt_ -= 1.0;
-		if (result <= 0) {
-			HandleCoreStop(result);
-			return;
-		}
-	}
-	if (frameDebt_ < 0.0) frameDebt_ = 0.0;
-	// Never carry more than one frame of debt: catching up is what caused the
-	// spiral above, so extra debt is simply dropped.
-	if (frameDebt_ > 2.0) frameDebt_ = 2.0;
 }
 
 void SphynxPlayerScreen::UpdatePadState() {
@@ -649,6 +635,12 @@ void SphynxPlayerScreen::UpdatePadState() {
 	// writes the mapped physical inputs into it, and we only read it back. That
 	// is why a gamepad mapped for PSP also works here, unchanged.
 	const unsigned bits = __CtrlPeekButtons();
+	// Nothing changed since the last display frame: the core already has this
+	// state, so there is nothing to do (this runs 60 times a second).
+	if (bits == lastPadBits_ && lastPadValid_)
+		return;
+	lastPadBits_ = bits;
+	lastPadValid_ = true;
 	float lx = 0.0f, ly = 0.0f, rx = 0.0f, ry = 0.0f;
 	__CtrlPeekAnalog(0, &lx, &ly);
 	__CtrlPeekAnalog(1, &rx, &ry);
@@ -782,14 +774,22 @@ void SphynxPlayerScreen::UpdateStatusLine() {
 		return;
 	char line[256];
 	const float padOpacity = g_Config.iTouchButtonOpacity / 100.0f;
-	std::snprintf(line, sizeof(line), "Sphynx %s · %s%s%s · %dx%d · %llu frames · pad %s %.2f",
+	// The two numbers that decide whether a game "lags": how many frames the core
+	// delivers per second, and how long one emulated frame takes. Both are
+	// measured on the core thread, so they can be compared with V5's behaviour
+	// instead of described by feel.
+	std::snprintf(line, sizeof(line),
+	              "Sphynx %s · %s%s%s · %dx%d · %.1f fps · %.1f ms · up:%llu · pad %s",
 	              PPSSPP_GIT_VERSION,
 	              player_ ? (SystemName().empty() ? "?" : SystemName().c_str()) : "starting",
 	              stopped_ ? " · stopped" : "",
 	              sound_ ? "" : " · muted",
-	              texWidth_, texHeight_, framesDrawn_,
-	              padForcedOn_ ? "on(auto)" : (g_Config.bShowTouchControls ? "on" : "OFF"),
-	              padOpacity);
+	              texWidth_, texHeight_,
+	              player_ ? sphynx_player_measured_fps(player_) : 0.0,
+	              player_ ? sphynx_player_frame_ms(player_) : 0.0,
+	              framesDrawn_,
+	              padForcedOn_ ? "on(auto)" : (g_Config.bShowTouchControls ? "on" : "OFF"));
+	(void)padOpacity;
 	statusView_->SetText(line);
 }
 
@@ -803,8 +803,16 @@ float SphynxPlayerScreen::dp(float value) {
 }
 
 void SphynxPlayerScreen::OpenPauseMenu() {
+	// The emulation thread parks itself while a menu is open: the menu is
+	// responsive, the battery is not drained behind a paused game, and resuming
+	// costs nothing because nothing is torn down.
+	if (player_) sphynx_player_set_paused(player_, 1);
 	FlushSave();
 	screenManager()->push(new SphynxPauseScreen(this));
+}
+
+void SphynxPlayerScreen::ClosePauseMenu() {
+	if (player_ && !stopped_) sphynx_player_set_paused(player_, 0);
 }
 
 bool SphynxPlayerScreen::SaveState(int slot, std::string *message) {
@@ -944,6 +952,8 @@ void SphynxPlayerScreen::focusChanged(ScreenFocusChange focusChange) {
 		// Returning from a menu: do not count the menu time as game time.
 		lastTime_ = time_now_d();
 		frameDebt_ = 0.0;
+		// The menu is gone: let the emulation thread run again.
+		if (!stopped_ && !failed_) ClosePauseMenu();
 		// SPHYNX (settings style, stage 11): PPSSPP's Settings screen can have
 		// changed what the buttons look like (opacity, scale, layout, show/hide).
 		// EmuScreen rebuilds its views after settings for the same reason; without
