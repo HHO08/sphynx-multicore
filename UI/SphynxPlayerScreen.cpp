@@ -256,6 +256,11 @@ SphynxPlayerScreen::SphynxPlayerScreen(const Path &gamePath, const std::string &
 }
 
 SphynxPlayerScreen::~SphynxPlayerScreen() {
+	// Undo the force above, so the rest of the app keeps the user's own setting.
+	if (padForcedOn_) {
+		g_Config.bShowTouchControls = false;
+		padForcedOn_ = false;
+	}
 	if (player_) {
 		sphynx_player_flush_save(player_);
 		sphynx_player_close(player_);
@@ -272,6 +277,19 @@ SphynxPlayerScreen::~SphynxPlayerScreen() {
 void SphynxPlayerScreen::CreateViews() {
 	using namespace UI;
 
+	// SPHYNX (button system, stage 12): the requirement is PPSSPP's own pad, on
+	// screen, always. PPSSPP's default for ShowTouchControls is false unless the
+	// device reports itself as DEVICE_TYPE_MOBILE (Core/Config.cpp,
+	// DefaultShowTouchControls), and the setting is per-game - so a phone that
+	// reports anything else, or a per-game profile written by an older install,
+	// leaves CreatePadLayout() returning an empty layout: a game picture with no
+	// buttons at all. That is one of the two things the owner keeps seeing, so
+	// the player forces the pad on for its own screen only. Nothing is written to
+	// the config, and the status line says when it happened.
+	padForcedOn_ = !g_Config.bShowTouchControls;
+	if (padForcedOn_)
+		g_Config.bShowTouchControls = true;
+
 	const Bounds &bounds = screenManager()->getUIContext()->GetLayoutBounds();
 	InitPadLayout(bounds.w, bounds.h);
 
@@ -280,11 +298,25 @@ void SphynxPlayerScreen::CreateViews() {
 	const bool showPauseButton = !System_GetPropertyBool(SYSPROP_HAS_BACK_BUTTON) || g_Config.bShowTouchPause;
 	root_ = CreatePadLayout(bounds.w, bounds.h, &pauseTrigger_, showPauseButton, &controlMapper_);
 	root_->SetTag("sphynxpad");
+
+	// The status line. Small, top-left, and the only thing on this screen that
+	// is not PPSSPP's own: it names the build and says whether frames are
+	// arriving. Without it, "the app threw me out" and "the core never drew a
+	// frame" look exactly the same from a photograph-free bug report.
+	statusView_ = root_->Add(new TextView("Sphynx", new AnchorLayoutParams(dp(8), dp(6), NONE, NONE, false)));
+	statusView_->SetSmall(true);
+	statusView_->SetShadow(true);
+	statusView_->SetTextColor(0xFFE0E0E0);
+	UpdateStatusLine();
 }
 
 ScreenRenderFlags SphynxPlayerScreen::render(ScreenRenderMode mode) {
-	// UIScreen::render draws DrawBackground() and then the button layout, which
-	// is exactly the order we need: game picture first, controls on top.
+	// SPHYNX (stage 12): the newest frame is moved into the texture here, while
+	// the draw pass owns the GPU context - the same place PPSSPP uploads its own
+	// textures. Then UIScreen::render draws DrawBackground() and the button
+	// layout on top, which is exactly the order we need.
+	if (player_ && !stopped_)
+		UploadFrame();
 	return UIScreen::render(mode);
 }
 
@@ -301,6 +333,7 @@ void SphynxPlayerScreen::DrawVideo(UIContext &dc, bool dim) {
 		dc.FillRect(UI::Drawable(0xFF000000), dc.GetBounds());
 		return;
 	}
+	framesDrawn_++;
 	const Bounds &bounds = dc.GetBounds();
 	// Keep the aspect ratio: a stretched SNES picture is not "identical to
 	// PPSSPP", it is just wrong.
@@ -348,7 +381,17 @@ void SphynxPlayerScreen::update() {
 	GamepadUpdateOpacity(g_Config.iTouchButtonOpacity / 100.0f);
 
 	RunFrames();
-	UploadFrame();
+
+	// SPHYNX (stage 12): the frame is uploaded from render(), inside the draw
+	// pass, not here. Creating and filling a GPU texture from update() is what
+	// every other PPSSPP screen avoids, and on an Android GL driver it is a
+	// use-outside-the-render-pass hazard. The newest frame simply waits in the
+	// core's queue until the next render() and costs nothing.
+
+	if (time_now_d() - lastStatus_ > 0.5) {
+		lastStatus_ = time_now_d();
+		UpdateStatusLine();
+	}
 }
 
 void SphynxPlayerScreen::StartGame() {
@@ -436,6 +479,23 @@ void SphynxPlayerScreen::OnVirtualKey(int virtualKey, bool down) {
 	case VIRTKEY_FASTFORWARD:
 		SetFastForward(down);
 		break;
+	case VIRTKEY_TOGGLE_TOUCH_CONTROLS:
+		// Same code as EmuScreen's handler: a tap on a faded-out pad brings it
+		// back instead of doing nothing.
+		if (down) {
+			if (g_Config.bShowTouchControls) {
+				if (GamepadGetOpacity() < 0.01f) {
+					GamepadTouch();
+				} else {
+					GamepadTouch(true);
+				}
+			} else {
+				g_Config.bShowTouchControls = true;
+				RecreateViews();
+				GamepadTouch();
+			}
+		}
+		break;
 	default:
 		break;
 	}
@@ -497,6 +557,9 @@ void SphynxPlayerScreen::UpdatePadState() {
 
 void SphynxPlayerScreen::UploadFrame() {
 	if (!player_) return;
+	// No draw context means no GPU: this happens for a frame or two after the
+	// app returns from the background. The frame simply waits.
+	if (!screenManager() || !screenManager()->getDrawContext()) return;
 	const unsigned want_w = (unsigned)texWidth_, want_h = (unsigned)texHeight_;
 	(void)want_w;
 	(void)want_h;
@@ -611,6 +674,25 @@ void SphynxPlayerScreen::ShowProblem(const std::string &title, const std::string
 	root_->Add(scroll);
 }
 
+// One line: build, system, core, picture, pad. Everything needed to tell the
+// three possible states apart - screen never opened, core running but silent,
+// or running normally.
+void SphynxPlayerScreen::UpdateStatusLine() {
+	if (!statusView_ || failed_)
+		return;
+	char line[256];
+	const float padOpacity = g_Config.iTouchButtonOpacity / 100.0f;
+	std::snprintf(line, sizeof(line), "Sphynx %s · %s%s%s · %dx%d · %llu frames · pad %s %.2f",
+	              PPSSPP_GIT_VERSION,
+	              player_ ? (SystemName().empty() ? "?" : SystemName().c_str()) : "starting",
+	              stopped_ ? " · stopped" : "",
+	              sound_ ? "" : " · muted",
+	              texWidth_, texHeight_, framesDrawn_,
+	              padForcedOn_ ? "on(auto)" : (g_Config.bShowTouchControls ? "on" : "OFF"),
+	              padOpacity);
+	statusView_->SetText(line);
+}
+
 float SphynxPlayerScreen::dp(float value) {
 	// PPSSPP's layouts are authored for a 480-point-tall screen; scale the same
 	// way the UI does so the panel is the same physical size on every device.
@@ -638,8 +720,9 @@ bool SphynxPlayerScreen::LoadState(int slot, std::string *message) {
 	char msg[256] = {};
 	const int ok = sphynx_player_load_state(player_, slot, msg, sizeof(msg));
 	if (message) *message = msg;
-	// A state that loads changes the picture right away, not on the next frame.
-	if (ok) UploadFrame();
+	// A loaded state does not emit a frame by itself. render() uploads whatever
+	// the core produces next, so the picture is refreshed by the very next
+	// rendered frame without touching the GPU from here.
 	return ok == 1;
 }
 

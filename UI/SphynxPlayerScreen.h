@@ -34,6 +34,10 @@
 
 struct SphynxPlayerHandle;
 
+namespace UI {
+class TextView;
+}
+
 namespace Draw {
 class Texture;
 }
@@ -89,6 +93,12 @@ private:
 	// failure: the user asked for "no automatic kicking", so nothing ever
 	// changes screen behind their back - leaving is a button they press.
 	void ShowProblem(const std::string &title, const std::string &detail);
+	// One small line in the corner that says which build is running, which
+	// system and core the game is using, how many frames have been drawn and
+	// what the touch pad is doing. It exists because there is no other way to
+	// tell "the app threw me out" apart from "the picture never arrived" on a
+	// device I cannot attach a debugger to. It costs one TextView.
+	void UpdateStatusLine();
 	float dp(float value);
 	void OnVirtualKey(int virtualKey, bool down);
 
@@ -97,6 +107,10 @@ private:
 	SphynxPlayerHandle *player_ = nullptr;
 
 	Draw::Texture *texture_ = nullptr;
+	// Status line widget (see UpdateStatusLine()).
+	UI::TextView *statusView_ = nullptr;
+	double lastStatus_ = 0.0;
+	unsigned long long framesDrawn_ = 0;
 	std::vector<unsigned char> upload_;
 	int texWidth_ = 0;
 	int texHeight_ = 0;
@@ -111,6 +125,8 @@ private:
 	bool noFrameWarned_ = false;
 	double startTime_ = 0.0;
 	bool fastForward_ = false;
+	// Set when the pad had to be switched on for this screen (see CreateViews).
+	bool padForcedOn_ = false;
 	bool sound_ = true;
 
 	double lastTime_ = 0.0;

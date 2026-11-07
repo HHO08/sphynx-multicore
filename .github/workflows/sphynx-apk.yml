@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.11
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.12
   SPHYNX_ABI: armeabi-v7a
 
 jobs:

@@ -224,6 +224,18 @@ def main(root: str) -> int:
         if "sphynx_player_frame_size(" not in text:
             problems.append("UI/SphynxPlayerScreen.cpp takes frames without sizing the buffer (large frames would never appear)")
 
+        # Stage 12: the pad must never be allowed to be absent, and the screen
+        # must say on screen what it is doing.
+        if "padForcedOn_" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp no longer forces PPSSPP's pad on (ShowTouchControls may default to false)")
+        if "UpdateStatusLine" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp lost its on-screen status line")
+        # The GPU must only be touched from the render pass.
+        upd = text.find("void SphynxPlayerScreen::update()")
+        rend = text.find("ScreenRenderFlags SphynxPlayerScreen::render(")
+        if upd >= 0 and rend >= 0 and "UploadFrame();" in text[upd:rend]:
+            problems.append("UI/SphynxPlayerScreen.cpp uploads a texture from update() instead of render()")
+
     #    c) The game must not be stopped by us. The frame-budget watchdog used to
     #       kill CD-based cores on slow phones a few seconds after launch.
     player_core = repo / "extcores" / "src" / "player_core.cpp"
