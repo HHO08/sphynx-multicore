@@ -361,6 +361,11 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 		return 0;
 	});
 
+	// A Saturn or Dreamcast core can spend a second or two on its first frame
+	// (BIOS checks, shader-ish init). The watchdog is there to catch a genuine
+	// hang, not to turn a slow phone into an error message, so it is generous.
+	p->session.SetWatchdogMs(10000);
+
 	std::string start_error;
 	if (!p->session.Start(core_path, local, system_dir, p->save_dir, &start_error)) {
 		const std::string message = start_error.empty() ? "the emulator refused this game" : start_error;

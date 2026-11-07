@@ -122,6 +122,10 @@ SPHYNX_UI_EXPORT int sphynx_ui_launch_player(const char *path);
 // same table the game-list filter uses, so the two can never disagree).
 SPHYNX_UI_EXPORT int sphynx_ui_is_known_extension(const char *path);
 
+// Short build tag of this binary, printed on screen when a game starts so a
+// screenshot says unambiguously which build is running.
+SPHYNX_UI_EXPORT const char *sphynx_ui_build_tag(void);
+
 // Flight recorder: PSP/sphynx_log.txt (see diag_log.h).
 SPHYNX_UI_EXPORT void sphynx_ui_set_log_path(const char *path);
 SPHYNX_UI_EXPORT const char *sphynx_ui_log_path(void);

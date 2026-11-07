@@ -62,6 +62,7 @@
 #include "UI/InstallZipScreen.h"
 #include "Core/Config.h"
 // SPHYNX: C bridge to the external-core host.
+#include "Common/System/OSD.h"
 #include "sphynx_ui_api.h"
 // Stage 9: the in-process player screen (see UI/SphynxPlayerScreen.h).
 #include "UI/SphynxPlayerScreen.h"
@@ -94,22 +95,17 @@ static bool SphynxLaunchPlayer(ScreenManager *screenManager, const std::string &
 	// The old path started a second Activity with its own GLSurfaceView; that is
 	// what produced the black screen, the foreign-looking buttons and the
 	// "kicked back to a restarted PPSSPP" behaviour.
-	if (screenManager) {
-		// Entered the same way a PSP game enters EmuScreen: it becomes the
-		// screen, and leaving it returns to the game list.
-		screenManager->switchScreen(new SphynxPlayerScreen(Path(path)));
-		return true;
+	if (!screenManager) {
+		// Cannot happen: every caller is a screen. Say so instead of silently
+		// doing nothing, so a future refactor fails loudly in the log.
+		sphynx_ui_log_line((std::string("route: no screen manager, cannot play ") + path).c_str());
+		return false;
 	}
-#if PPSSPP_PLATFORM(ANDROID)
-	// No screen manager (should not happen): fall back to the old Activity.
-	const int launched = sphynx_ui_launch_player(path.c_str());
-	if (launched == 1)
-		return true;
-	Sphynx_SendCommandToJava("sphynx_launch", path.c_str());
+	// Entered the same way a PSP game enters EmuScreen: it becomes the screen,
+	// and leaving it returns to the game list. There is no Activity, no Intent
+	// and no second window involved - that whole layer is gone.
+	screenManager->switchScreen(new SphynxPlayerScreen(Path(path)));
 	return true;
-#else
-	return false;
-#endif
 }
 
 bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {
@@ -1175,6 +1171,17 @@ MainScreen::~MainScreen() {
 }
 
 void MainScreen::CreateViews() {
+	// SPHYNX: say once per launch which build this is. A screenshot of the game
+	// list is then enough to tell a new install from an old one, instead of
+	// guessing from behaviour.
+	static bool sphynxBannerShown = false;
+	if (!sphynxBannerShown) {
+		sphynxBannerShown = true;
+		g_OSD.Show(OSDType::MESSAGE_INFO,
+			std::string("Sphynx ") + sphynx_ui_build_tag() + " — all systems play inside PPSSPP",
+			4.0f);
+	}
+
 	// Information in the top left.
 	// Back button to the bottom left.
 	// Scrolling action menu to the right.

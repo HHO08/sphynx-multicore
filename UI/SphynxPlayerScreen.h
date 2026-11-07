@@ -85,6 +85,11 @@ private:
 	void UploadFrame();
 	void HandleCoreStop(int result);
 	void QuitToMenu(const std::string &reason);
+	// Shows the reason *inside* the player and stays there. Used for every
+	// failure: the user asked for "no automatic kicking", so nothing ever
+	// changes screen behind their back - leaving is a button they press.
+	void ShowProblem(const std::string &title, const std::string &detail);
+	float dp(float value);
 	void OnVirtualKey(int virtualKey, bool down);
 
 	Path gamePath_;
@@ -100,6 +105,11 @@ private:
 	bool pauseTrigger_ = false;
 	bool started_ = false;
 	bool stopped_ = false;
+	bool failed_ = false;
+	// Diagnostics that never interrupt: "running but nothing drawn yet".
+	bool frameSeen_ = false;
+	bool noFrameWarned_ = false;
+	double startTime_ = 0.0;
 	bool fastForward_ = false;
 	bool sound_ = true;
 

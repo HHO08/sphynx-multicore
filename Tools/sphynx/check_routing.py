@@ -116,13 +116,10 @@ def main(root: str) -> int:
         problems.append("UI/GameScreen.cpp does not route when the game sheet opens")
     if "bool SphynxRouteBootFailure(ScreenManager *screenManager, const Path &path) {" not in main_screen:
         problems.append("UI/MainScreen.cpp does not define SphynxRouteBootFailure()")
-    if "sphynx_ui_launch_player" not in main_screen:
-        problems.append("UI/MainScreen.cpp does not open the player from native code")
     if "sphynx_ui_log_line" not in main_screen:
         problems.append("UI/MainScreen.cpp does not record routing decisions in the log")
-    for rel in ("extcores/jni/sphynx_launch_jni.cpp", "extcores/src/diag_log.cpp"):
-        if not (repo / rel).exists():
-            problems.append(f"{rel} is missing")
+    if not (repo / "extcores" / "src" / "diag_log.cpp").exists():
+        problems.append("extcores/src/diag_log.cpp is missing")
 
     # 4. the BIOS tree is built at start-up on both sides of the bridge
     native_app = (repo / "UI" / "NativeApp.cpp").read_text(encoding="utf-8", errors="surrogateescape")
@@ -152,14 +149,61 @@ def main(root: str) -> int:
         problems.append("UI/MainScreen.cpp no longer opens the player screen")
     if "new MainScreen()" not in screen.read_text(encoding="utf-8", errors="surrogateescape") if screen.exists() else False:
         problems.append("UI/SphynxPlayerScreen.cpp does not return to the game list on exit")
-    player = repo / "android" / "src" / "org" / "sphynx" / "emulator" / "SphynxPlayerActivity.java"
-    if not player.exists():
-        problems.append("SphynxPlayerActivity.java is missing")
+    # Stage 10: the separate player Activity must be GONE. Keeping it in the
+    # build is what let an old, hand-drawn button layout reappear on a device
+    # after the new player had already been written.
+    for gone in ("android/src/org/sphynx/emulator/SphynxPlayerActivity.java",
+                 "extcores/src/player_android.cpp",
+                 "extcores/jni/sphynx_launch_jni.cpp"):
+        if (repo / gone).exists():
+            problems.append(f"{gone} is back: the old Activity-based player must stay deleted")
+    manifest = (repo / "android" / "AndroidManifest.xml").read_text(encoding="utf-8", errors="surrogateescape")
+    if "SphynxPlayerActivity" in manifest:
+        problems.append("AndroidManifest.xml still declares the old player Activity")
+    activity = (repo / "android" / "src" / "org" / "ppsspp" / "ppsspp" / "NativeActivity.java").read_text(encoding="utf-8", errors="surrogateescape")
+    if "new Intent(this, org.sphynx.emulator.SphynxPlayerActivity.class)" in activity:
+        problems.append("NativeActivity.java still starts the old player Activity")
+
+    # ... and the new screen must never leave on its own: every failure path
+    # goes through ShowProblem(), which stays on screen until the user taps.
+    if "ShowProblem" not in screen.read_text(encoding="utf-8", errors="surrogateescape") if screen.exists() else True:
+        problems.append("UI/SphynxPlayerScreen.cpp has no on-screen problem panel (failures would kick the user out)")
+
+    # 4. the BIOS tree is built at start-up on both sides of the bridge
+    native_app = (repo / "UI" / "NativeApp.cpp").read_text(encoding="utf-8", errors="surrogateescape")
+    if "sphynx_ui_ensure_bios_tree" not in native_app:
+        problems.append("UI/NativeApp.cpp does not build PSP/SYSTEMS_BIOS at start-up")
+    activity = repo / "android" / "src" / "org" / "ppsspp" / "ppsspp" / "NativeActivity.java"
+    if not activity.exists() or "ensureBiosTree" not in activity.read_text(encoding="utf-8", errors="surrogateescape"):
+        problems.append("NativeActivity.java does not create the BIOS tree at start-up")
+
+    # 5. Stage 9: the player is a PPSSPP screen, and it must keep using
+    # PPSSPP's own pad and menu instead of drawing its own.
+    screen = repo / "UI" / "SphynxPlayerScreen.cpp"
+    if not screen.exists():
+        problems.append("UI/SphynxPlayerScreen.cpp is missing")
     else:
-        text = player.read_text(encoding="utf-8", errors="surrogateescape")
-        for needed in ("\"Save state\"", "\"Load state\"", "\"Settings\"", "nativeSaveState", "nativeLoadState"):
+        text = screen.read_text(encoding="utf-8", errors="surrogateescape")
+        if "CreatePadLayout(" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not use PPSSPP's own touch pad")
+        for needed in ("\"Save state\"", "\"Load state\"", "pa->T(\"Settings\")"):
             if needed not in text:
-                problems.append(f"SphynxPlayerActivity.java lost {needed}")
+                problems.append(f"UI/SphynxPlayerScreen.cpp lost the {needed} entry")
+        if "GameSettingsScreen" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not open PPSSPP's settings screen")
+        if "sphynx_player_" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not talk to the player core")
+    if "new SphynxPlayerScreen(" not in main_screen:
+        problems.append("UI/MainScreen.cpp no longer opens the player screen")
+    if "new MainScreen()" not in screen.read_text(encoding="utf-8", errors="surrogateescape") if screen.exists() else False:
+        problems.append("UI/SphynxPlayerScreen.cpp does not return to the game list on exit")
+    # The three entries the owner required must exist in the in-process player's
+    # pause menu and must keep working through the core's own save states.
+    if screen.exists():
+        text = screen.read_text(encoding="utf-8", errors="surrogateescape")
+        for needed in ("SaveState(", "LoadState(", "GameSettingsScreen("):
+            if needed not in text:
+                problems.append(f"UI/SphynxPlayerScreen.cpp lost {needed}")
 
     if problems:
         print("\nROUTING CHECK FAILED:")

@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.6
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.10
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -133,8 +133,7 @@ jobs:
           g++ -std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter -DSPHYNX_ANDROID=1 \
               -Iextcores/tests/android-stubs -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
               -Iextcores/include -Iextcores/src \
-              extcores/src/player_android.cpp extcores/jni/sphynx_extcore_jni.cpp \
-              extcores/jni/sphynx_launch_jni.cpp \
+              extcores/jni/sphynx_extcore_jni.cpp \
               extcores/src/android_paths.cpp extcores/src/ui_api.cpp \
               extcores/src/bios_layout.cpp extcores/src/state_file.cpp \
               extcores/src/diag_log.cpp extcores/src/player_core.cpp \
@@ -208,6 +207,25 @@ jobs:
           echo "cores_in_apk=$CORES" >> "$GITHUB_OUTPUT"
           echo "APK: $TARGET ($MB MiB), emulator cores inside: $CORES"
           test "$CORES" -ge 23 || { echo "::error::expected 23 cores in the APK, found $CORES"; exit 1; }
+
+          # Stage 10 self-check: the stale Activity-based player must not be in
+          # this APK at all, and the in-process player must be. Without this,
+          # an old build could be handed over by mistake and would look exactly
+          # like the bug being "not fixed".
+          CLASSES=$(unzip -p "$TARGET" classes.dex | strings | grep -c 'SphynxPlayerActivity' || true)
+          if [ "${CLASSES:-0}" != "0" ]; then
+            echo "::error::this APK still contains the old SphynxPlayerActivity"
+            exit 1
+          fi
+          unzip -p "$TARGET" lib/armeabi-v7a/libppsspp_jni.so > /tmp/jni.so
+          for sym in SphynxPlayerScreen SphynxPauseScreen; do
+            strings /tmp/jni.so | grep -q "$sym" || { echo "::error::missing $sym in libppsspp_jni.so"; exit 1; }
+          done
+          for sym in sphynx_player_open sphynx_player_run sphynx_player_take_frame; do
+            unzip -p "$TARGET" lib/armeabi-v7a/libsphynx_extcore.so | strings | grep -q "$sym" \
+              || { echo "::error::missing $sym in libsphynx_extcore.so"; exit 1; }
+          done
+          echo "in-process player verified in the APK; old Activity absent"
 
           unzip -l "$TARGET" | grep -E 'lib/' | sort -k1 -n -r | head -30
           sha256sum "$TARGET" | tee out/SHA256SUMS.txt

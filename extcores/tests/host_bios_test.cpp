@@ -345,7 +345,8 @@ void TestExtensionRouting() {
 	Check(sphynx_ui_is_known_extension("/x/game") == 0, "a file without an extension is not claimed");
 	// The player screen cannot be opened from a host binary: the caller falls
 	// back to the command queue, so this must answer 0, never crash.
-	Check(sphynx_ui_launch_player("/x/game.sfc") == 0, "no Context on the host: launch reports 0");
+	// Stage 10: nothing is launched any more - the player is a PPSSPP screen.
+	Check(sphynx_ui_launch_player("/x/game.sfc") == -1, "launching an Activity is refused: the player is in-process");
 }
 
 }  // namespace

@@ -404,12 +404,14 @@ char *sphynx_ui_bios_missing(const char *system_key) {
 //  Launching the player + diagnostics
 // ---------------------------------------------------------------------------
 
-#if !defined(SPHYNX_ANDROID)
-// Desktop builds have no Activity to open: the real implementation lives in
-// extcores/jni/sphynx_launch_jni.cpp, which only exists in the Android build.
+// Stage 10: there is no player Activity any more. Every system is played by
+// UI/SphynxPlayerScreen.cpp, a normal PPSSPP screen in this same process, so
+// there is nothing to "launch" and nothing that can take the user out of
+// PPSSPP. The two entry points are kept because the header still declares them
+// (older call sites exist) and because a future platform may have its own
+// window system; on every platform they now report "handled in-process".
 void sphynx_ui_set_context(void *, void *) {}
-int sphynx_ui_launch_player(const char *) { return 0; }
-#endif
+int sphynx_ui_launch_player(const char *) { return -1; }
 
 void sphynx_ui_set_log_path(const char *path) { sphynx::SetLogPath(path ? path : ""); }
 
@@ -439,6 +441,18 @@ const char *sphynx_ui_diag_report(void) {
 	report += "\n----\n";
 	report += log.empty() ? "(log is empty)" : log;
 	return report.c_str();
+}
+
+// The short build tag shown on screen ("1.18.1-sphynx.10"). It comes from the
+// build itself (BuildId), so a screenshot always says which build is running.
+const char *sphynx_ui_build_tag(void) {
+	static std::string tag;
+	if (tag.empty()) {
+		tag = sphynx::BuildId();
+		const size_t space = tag.find(' ');
+		if (space != std::string::npos) tag = tag.substr(0, space);
+	}
+	return tag.c_str();
 }
 
 const char *sphynx_ui_log_path(void) {

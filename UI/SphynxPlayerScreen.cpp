@@ -371,21 +371,27 @@ void SphynxPlayerScreen::StartGame() {
 				ChooseSystem(keys, names);
 				return;
 			}
-			QuitToMenu(err);
+			ShowProblem("This game could not be started", std::string(err) + "\n" + gamePath_.ToString());
 			return;
 		}
 	} else {
 		char err[512] = {};
 		player_ = sphynx_player_open(gamePath_.ToString().c_str(), key.c_str(), err, sizeof(err));
 		if (!player_) {
-			QuitToMenu(err);
+			ShowProblem("This game could not be started", std::string(err) + "\n" + gamePath_.ToString());
 			return;
 		}
 	}
 
 	SetSoundEnabled(sound_);
 	lastTime_ = time_now_d();
+	startTime_ = lastTime_;
 	frameDebt_ = 0.0;
+	// One line on screen naming the system and the build: it is how the user can
+	// tell this apart from any earlier player, without hunting through menus.
+	g_OSD.Show(OSDType::MESSAGE_INFO,
+		std::string("Sphynx player ") + sphynx_ui_build_tag() + " · " + sphynx_player_system_name(player_),
+		2.5f);
 	sphynx_ui_log_line((std::string("player screen: running ") + gamePath_.ToString()).c_str());
 }
 
@@ -398,7 +404,7 @@ void SphynxPlayerScreen::ChooseSystem(const std::vector<std::string> &keys, cons
 			char err[512] = {};
 			player_ = sphynx_player_open(path.ToString().c_str(), keys[choice].c_str(), err, sizeof(err));
 			if (!player_) {
-				QuitToMenu(err);
+				ShowProblem("This game could not be started", std::string(err) + "\n" + path.ToString());
 				return;
 			}
 			SetSoundEnabled(sound_);
@@ -421,6 +427,16 @@ void SphynxPlayerScreen::OnVirtualKey(int virtualKey, bool down) {
 
 void SphynxPlayerScreen::RunFrames() {
 	if (!player_) return;
+
+	// A core that runs but never draws looks like a black screen with buttons,
+	// which is indistinguishable from a crash. Say so on screen instead of
+	// guessing - this costs nothing and it is what a bug report needs.
+	if (!frameSeen_ && !noFrameWarned_ && startTime_ > 0.0 && time_now_d() - startTime_ > 4.0) {
+		noFrameWarned_ = true;
+		g_OSD.Show(OSDType::MESSAGE_WARNING,
+			std::string("No picture from the core yet — ") + sphynx_player_status(player_), 5.0f);
+		sphynx_ui_log_line((std::string("player screen: no frames after 4 s: ") + sphynx_player_status(player_)).c_str());
+	}
 
 	const double now = time_now_d();
 	if (lastTime_ == 0.0) lastTime_ = now;
@@ -479,6 +495,7 @@ void SphynxPlayerScreen::UploadFrame() {
 			// case is told apart by asking the player for its current size below.
 			break;
 		}
+		frameSeen_ = true;
 		bool recreate = (texture_ == nullptr) || w != texWidth_ || h != texHeight_;
 		if (texture_ && recreate) {
 			texture_->Release();
@@ -508,29 +525,73 @@ void SphynxPlayerScreen::UploadFrame() {
 }
 
 void SphynxPlayerScreen::HandleCoreStop(int result) {
+	stopped_ = true;
 	if (result < 0) {
-		stopped_ = true;
-		// A core that dies must say so in PPSSPP's own words, with the log
-		// attached, because the alternative - a silent black screen - is what
-		// made the previous round impossible to debug.
-		const std::string message = std::string("This game stopped: ") + sphynx_player_status(player_);
-		sphynx_ui_log_line((std::string("player screen: core stopped (") + (result < 0 ? "error" : "asked to stop") + ") " + message).c_str());
-		QuitToMenu(message);
+		ShowProblem("This game stopped", sphynx_player_status(player_));
 	} else {
-		stopped_ = true;
-		QuitToMenu("");
+		// The core asked to quit by itself (a game that ends, a menu choice):
+		// still the user's decision to leave, so offer it instead of doing it.
+		ShowProblem("The system stopped this game", "The emulated system closed the game by itself.");
 	}
 }
 
 void SphynxPlayerScreen::QuitToMenu(const std::string &reason) {
+	// Only ever reached from a button the user pressed, never automatically.
 	FlushSave();
-	if (!reason.empty()) {
-		// The message overlay survives the screen change, so the reason is read
-		// on top of the game list - like every other PPSSPP notification.
-		g_OSD.Show(OSDType::MESSAGE_ERROR, reason, 6.0f);
-		sphynx_ui_log_line((std::string("player screen: leaving: ") + reason).c_str());
-	}
 	screenManager()->switchScreen(new MainScreen());
+	(void)reason;
+}
+
+// Everything that can go wrong lands here, and here is a panel on the game
+// screen that stays until the user leaves. That is the difference between "it
+// did not work" and "the app threw me out": nothing happens behind the user's
+// back any more, and the reason is readable on the device.
+void SphynxPlayerScreen::ShowProblem(const std::string &title, const std::string &detail) {
+	if (failed_)
+		return;
+	failed_ = true;
+	stopped_ = true;
+
+	sphynx_ui_log_line((std::string("player screen: problem: ") + title + " | " + detail).c_str());
+
+	using namespace UI;
+	LinearLayout *panel = new LinearLayout(ORIENT_VERTICAL);
+	panel->SetSpacing(8.0f);
+
+	TextView *heading = panel->Add(new TextView(title));
+	heading->SetTextColor(0xFFE8E8E8);
+	heading->SetShadow(true);
+
+	TextView *body = panel->Add(new TextView(detail));
+	body->SetSmall(true);
+	body->SetTextColor(0xFFB8B8B8);
+
+	// The log tail: on a device I cannot touch this is the only way to learn what
+	// actually happened, and it is where "why did it stop" is answered.
+	TextView *logView = panel->Add(new TextView(sphynx_ui_diag_report()));
+	logView->SetSmall(true);
+	logView->SetTextColor(0xFF909090);
+
+	Choice *exit = panel->Add(new Choice("Back to the game list"));
+	exit->OnClick.Add([this](UI::EventParams &) {
+		screenManager()->switchScreen(new MainScreen());
+		return UI::EVENT_DONE;
+	});
+
+	const Bounds &bounds = screenManager()->getUIContext()->GetBounds();
+	const float width = std::min(bounds.w - dp(40), dp(620));
+	ScrollView *scroll = new ScrollView(ORIENT_VERTICAL, new AnchorLayoutParams(width, std::min(bounds.h - dp(40), dp(420)), NONE, NONE, NONE, NONE, true));
+	scroll->Add(panel);
+	root_->Add(scroll);
+}
+
+float SphynxPlayerScreen::dp(float value) {
+	// PPSSPP's layouts are authored for a 480-point-tall screen; scale the same
+	// way the UI does so the panel is the same physical size on every device.
+	ScreenManager *sm = screenManager();
+	UIContext *ctx = sm ? sm->getUIContext() : nullptr;
+	const float h = ctx ? ctx->GetBounds().h : 480.0f;
+	return value * (h / 480.0f);
 }
 
 void SphynxPlayerScreen::OpenPauseMenu() {

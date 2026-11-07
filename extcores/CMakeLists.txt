@@ -40,9 +40,7 @@ set(SPHYNX_EXTCORE_SOURCES
 if(ANDROID)
 	list(APPEND SPHYNX_EXTCORE_SOURCES
 		jni/sphynx_extcore_jni.cpp
-		# Opens the player screen from native code (no command-queue hop).
-		jni/sphynx_launch_jni.cpp
-		src/player_android.cpp)
+)
 	set(SPHYNX_JNI TRUE)
 endif()
 
