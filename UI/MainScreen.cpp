@@ -63,6 +63,7 @@
 #include "Core/Config.h"
 // SPHYNX: C bridge to the external-core host.
 #include "Common/System/OSD.h"
+#include "Common/StringUtils.h"
 #include "sphynx_ui_api.h"
 // Stage 9: the in-process player screen (see UI/SphynxPlayerScreen.h).
 #include "UI/SphynxPlayerScreen.h"
@@ -1177,8 +1178,11 @@ void MainScreen::CreateViews() {
 	static bool sphynxBannerShown = false;
 	if (!sphynxBannerShown) {
 		sphynxBannerShown = true;
+		// PPSSPP_GIT_VERSION is the string the user already knows how to read
+		// ("v1.18.1-38-gbdeabee"): it changes with every commit, so a photo of
+		// the game list now says which build is installed.
 		g_OSD.Show(OSDType::MESSAGE_INFO,
-			std::string("Sphynx ") + sphynx_ui_build_tag() + " — all systems play inside PPSSPP",
+			StringFromFormat("Sphynx %s — every system plays inside PPSSPP", PPSSPP_GIT_VERSION),
 			4.0f);
 	}
 

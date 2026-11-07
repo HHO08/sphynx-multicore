@@ -31,6 +31,7 @@
 #include "Common/Log.h"
 #include "Common/Render/DrawBuffer.h"
 #include "Common/System/OSD.h"
+#include "Common/StringUtils.h"
 #include "Common/System/System.h"
 #include "Common/TimeUtil.h"
 #include "Common/UI/Context.h"
@@ -390,7 +391,7 @@ void SphynxPlayerScreen::StartGame() {
 	// One line on screen naming the system and the build: it is how the user can
 	// tell this apart from any earlier player, without hunting through menus.
 	g_OSD.Show(OSDType::MESSAGE_INFO,
-		std::string("Sphynx player ") + sphynx_ui_build_tag() + " · " + sphynx_player_system_name(player_),
+		StringFromFormat("Sphynx player %s · %s", PPSSPP_GIT_VERSION, sphynx_player_system_name(player_)),
 		2.5f);
 	sphynx_ui_log_line((std::string("player screen: running ") + gamePath_.ToString()).c_str());
 }
@@ -562,7 +563,7 @@ void SphynxPlayerScreen::ShowProblem(const std::string &title, const std::string
 	heading->SetTextColor(0xFFE8E8E8);
 	heading->SetShadow(true);
 
-	TextView *body = panel->Add(new TextView(detail));
+	TextView *body = panel->Add(new TextView(StringFromFormat("%s\n\nBuild: %s", detail.c_str(), PPSSPP_GIT_VERSION)));
 	body->SetSmall(true);
 	body->SetTextColor(0xFFB8B8B8);
 
