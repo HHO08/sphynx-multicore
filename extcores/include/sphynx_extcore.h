@@ -258,6 +258,15 @@ public:
 	// Values the user has chosen for this system, restored before the core sees
 	// them, and reported back to the UI afterwards.
 	void SetInitialOptions(const std::vector<std::pair<std::string, std::string>> &values);
+
+	// SPHYNX (stage 15): the best-known settings for this core (see
+	// core_defaults.h). Declared options that the user never chose get the
+	// recommended value here, during retro_init(), so the core starts with it
+	// instead of forcing a restart afterwards. A value the user picked always
+	// wins; a recommendation the core does not offer is ignored.
+	void SetRecommendations(const std::string &core_tag) { core_tag_ = core_tag; }
+	// How many options got a recommended value on the last declaration.
+	int RecommendedCount() const { return recommended_; }
 	const std::vector<CoreOption> &Options() const { return options_; }
 	// Returns false when the key is unknown or the value is not offered by the
 	// core; a false here means the UI must not claim the change happened.
@@ -287,8 +296,12 @@ private:
 	std::vector<CoreOption> options_;
 	std::vector<std::pair<std::string, std::string>> initial_options_;
 	bool option_changed_ = false;
-	// Puts the remembered values onto freshly declared options.
+	// Puts the remembered values onto freshly declared options, then fills the
+	// rest with the recommendations of core_defaults.h.
 	void ApplyInitialOptions();
+	// Core tag used to look the recommendations up ("melonds", "pcsx_rearmed").
+	std::string core_tag_;
+	int recommended_ = 0;
 	PixelFormat pixel_format_ = PixelFormat::RGB565;
 	unsigned geom_w_ = 0, geom_h_ = 0;
 	float aspect_ = 0.0f;
@@ -323,6 +336,15 @@ public:
 	// Runs exactly one frame. Returns false when the core asks to stop or when
 	// the watchdog fired.
 	bool RunFrame();
+	// SPHYNX (stage 15 audio): a core that uses the per-sample callback hands us
+	// two int16 at a time - 44100 calls a second, each of which used to take the
+	// audio mutex and touch the ring buffer. The samples are staged here instead
+	// and delivered to the audio sink once per frame, which is the same audio
+	// with a fraction of the locks. Called by the libretro shims only.
+	void QueueAudioSample(int16_t left, int16_t right);
+	// Hands everything staged to the audio sink. RunFrame() does this itself;
+	// Stop() calls it so the last fraction of a frame is not lost.
+	void FlushAudioStage();
 	void Stop();
 	bool IsRunning() const { return running_; }
 
@@ -371,6 +393,8 @@ private:
 	int watchdog_ms_ = 3000;
 	double sample_rate_ = 44100.0;
 	double frame_rate_ = 60.0;
+	// Interleaved stereo staging buffer for the per-sample audio callback.
+	std::vector<int16_t> audio_stage_;
 };
 
 // ---------------------------------------------------------------------------

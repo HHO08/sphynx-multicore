@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.14
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.15
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -88,14 +88,14 @@ jobs:
           gcc -shared -fPIC -o out/libbroken_core.so out/b.c
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_smoke extcores/src/system_db.cpp extcores/src/core_loader.cpp \
-              extcores/src/env_callback.cpp extcores/src/session.cpp extcores/tests/host_smoke.cpp -ldl -pthread
+              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp extcores/src/session.cpp extcores/tests/host_smoke.cpp -ldl -pthread
           ./out/host_smoke ./out/libstub_core.so ./out/libbroken_core.so | tee out/host-test.txt
 
           # Stage 4: the UI bridge (game list filter, archive routing, the
           # chooser for ambiguous discs, the PNG thumbnail encoder).
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
               -o out/host_ui_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
-              extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
               extcores/src/state_file.cpp extcores/src/diag_log.cpp \
@@ -107,10 +107,11 @@ jobs:
           # player session (frames/audio/input/save state).
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_play_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
-              extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
               extcores/src/state_file.cpp extcores/src/diag_log.cpp \
+              extcores/src/player_core.cpp extcores/src/player_audio.cpp \
               extcores/tests/host_play_test.cpp -ldl -pthread
           ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
 
@@ -119,12 +120,22 @@ jobs:
           # format (round trip, wrong core, corruption).
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_bios_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
-              extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
               extcores/src/state_file.cpp extcores/src/diag_log.cpp \
               extcores/tests/host_bios_test.cpp -ldl -pthread
           ./out/host_bios_test | tee out/host-bios-test.txt
+
+          # Stage 15: "the best settings for this core" — the explicit table, the
+          # generic rules over the core's own options, and the two safety rules
+          # (never invent a key, never use a value the core did not offer). Also
+          # proves that a value the user picked always wins.
+          g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
+              -o out/host_defaults_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
+              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp \
+              extcores/tests/host_defaults_test.cpp -ldl -pthread
+          ./out/host_defaults_test | tee out/host-defaults-test.txt
 
           # The Android-only translation units never get compiled on a runner
           # without the NDK; type-check them against the stub headers so a typo
@@ -137,7 +148,7 @@ jobs:
               extcores/src/android_paths.cpp extcores/src/ui_api.cpp \
               extcores/src/bios_layout.cpp extcores/src/state_file.cpp \
               extcores/src/diag_log.cpp extcores/src/player_core.cpp \
-              extcores/src/player_audio.cpp
+              extcores/src/player_audio.cpp extcores/src/core_defaults.cpp
 
           # Stage 9: the player core that PPSSPP's own screen drives. It has no
           # host test (it needs a core to run), but it must at least compile
@@ -221,9 +232,16 @@ jobs:
           for sym in SphynxPlayerScreen SphynxPauseScreen; do
             strings /tmp/jni.so | grep -q "$sym" || { echo "::error::missing $sym in libppsspp_jni.so"; exit 1; }
           done
-          for sym in sphynx_player_open sphynx_player_run sphynx_player_take_frame; do
+          for sym in sphynx_player_open sphynx_player_run sphynx_player_take_frame \
+                     sphynx_player_bios_report sphynx_ui_prepare_bios; do
             unzip -p "$TARGET" lib/armeabi-v7a/libsphynx_extcore.so | strings | grep -q "$sym" \
               || { echo "::error::missing $sym in libsphynx_extcore.so"; exit 1; }
+          done
+          # Stage 15: the recommendation table really is compiled in (the DS
+          # white-screen fix lives there), and the stale-open repair is present.
+          for text in melonds_renderer mupen64plus-Resolution self-repair; do
+            unzip -p "$TARGET" lib/armeabi-v7a/libsphynx_extcore.so | strings | grep -q "$text" \
+              || { echo "::error::missing stage-15 text $text in libsphynx_extcore.so"; exit 1; }
           done
           echo "in-process player verified in the APK; old Activity absent"
 

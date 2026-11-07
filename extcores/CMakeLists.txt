@@ -14,6 +14,10 @@
 set(SPHYNX_EXTCORE_SOURCES
 	src/system_db.cpp
 	src/core_loader.cpp
+	# Stage 15: the recommended settings for every bundled core (see
+	# core_defaults.h). Compiled into the shipped library, and covered by
+	# tests/host_defaults_test.cpp.
+	src/core_defaults.cpp
 	src/env_callback.cpp
 	src/session.cpp
 	src/png_write.cpp
@@ -105,6 +109,7 @@ if(SPHYNX_BUILD_TESTS)
 		tests/host_smoke.cpp
 		src/system_db.cpp
 		src/core_loader.cpp
+		src/core_defaults.cpp
 		src/env_callback.cpp
 		src/session.cpp
 	)
@@ -131,6 +136,10 @@ if(SPHYNX_BUILD_TESTS)
 		src/bios_layout.cpp
 		src/state_file.cpp
 		src/diag_log.cpp
+		# Stage 15: the play test also drives the real player API, which is where
+		# the "another game is already running" repair lives.
+		src/player_core.cpp
+		src/player_audio.cpp
 	)
 	target_include_directories(sphynx_host_play PRIVATE include src)
 	target_compile_features(sphynx_host_play PRIVATE cxx_std_17)
@@ -145,6 +154,7 @@ if(SPHYNX_BUILD_TESTS)
 		tests/host_bios_test.cpp
 		src/system_db.cpp
 		src/core_loader.cpp
+		src/core_defaults.cpp
 		src/env_callback.cpp
 		src/session.cpp
 		src/png_write.cpp
@@ -160,5 +170,22 @@ if(SPHYNX_BUILD_TESTS)
 
 	add_test(NAME sphynx_host_bios
 		COMMAND sphynx_host_bios
+		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+	# Stage 15: the recommended core settings (explicit table + generic rules +
+	# the two safety rules + "the user's own choice always wins").
+	add_executable(sphynx_host_defaults
+		tests/host_defaults_test.cpp
+		src/system_db.cpp
+		src/core_loader.cpp
+		src/core_defaults.cpp
+		src/env_callback.cpp
+	)
+	target_include_directories(sphynx_host_defaults PRIVATE include src)
+	target_compile_features(sphynx_host_defaults PRIVATE cxx_std_17)
+	target_link_libraries(sphynx_host_defaults PRIVATE ${CMAKE_DL_LIBS})
+
+	add_test(NAME sphynx_host_defaults
+		COMMAND sphynx_host_defaults
 		WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 endif()

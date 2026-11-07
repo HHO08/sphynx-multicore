@@ -22,6 +22,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "core_defaults.h"
+
 namespace sphynx {
 
 Environment::Environment() = default;
@@ -79,14 +81,31 @@ bool Environment::SetOption(const std::string &key, const std::string &value) {
 }
 
 void Environment::ApplyInitialOptions() {
+	recommended_ = 0;
 	for (auto &option : options_) {
+		bool chosen_by_user = false;
 		for (const auto &kv : initial_options_) {
 			if (kv.first != option.key) continue;
 			bool known = false;
 			for (const std::string &v : option.values) {
 				if (v == kv.second) known = true;
 			}
-			if (known) option.current = kv.second;
+			if (known) {
+				option.current = kv.second;
+				chosen_by_user = true;
+			}
+		}
+		// SPHYNX (stage 15): everything the user never touched gets the value
+		// this build knows is best for this core on this hardware. Only values
+		// the core itself declared can be picked, so this cannot make a core
+		// unhappy - at worst it changes nothing.
+		if (!chosen_by_user && !core_tag_.empty()) {
+			const std::string recommended =
+				RecommendOptionValue(core_tag_, option.key, option.values, option.current);
+			if (!recommended.empty() && recommended != option.current) {
+				option.current = recommended;
+				++recommended_;
+			}
 		}
 		// Whatever ended up current must also be what GET_VARIABLE answers, or
 		// the core and the UI would disagree from the first frame.
