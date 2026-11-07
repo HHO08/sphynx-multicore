@@ -34,6 +34,14 @@
 
 struct SphynxPlayerHandle;
 
+// One option declared by the running core, as the Settings screen needs it.
+struct SphynxCoreOption {
+	std::string key;
+	std::string label;
+	std::string current;
+	std::vector<std::string> values;
+};
+
 namespace UI {
 class TextView;
 }
@@ -68,6 +76,10 @@ public:
 	bool SaveState(int slot, std::string *message);
 	bool LoadState(int slot, std::string *message);
 	bool StateExists(int slot);
+	// --- the running core's own options (see SphynxCoreOptionsScreen) --------
+	int CoreOptionCount();
+	bool CoreOptionAt(int index, SphynxCoreOption *out);
+	bool SetCoreOption(const std::string &key, const std::string &value, std::string *message);
 	void SetSoundEnabled(bool on);
 	bool SoundEnabled() const { return sound_; }
 	void SetFastForward(bool on);

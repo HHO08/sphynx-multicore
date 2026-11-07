@@ -115,6 +115,25 @@ SPHYNX_PLAYER_EXPORT const char *sphynx_player_system_name(SphynxPlayerHandle *p
 SPHYNX_PLAYER_EXPORT const char *sphynx_player_bios_status(SphynxPlayerHandle *p);
 
 // Sound on/off (default on). Applies immediately.
+// ---------------------------------------------------------------------------
+//  Core options — the "Settings" entries that belong to the emulated core
+//
+//  SPHYNX (stage 13): inside a non-PSP game the user asked for the same thing V5
+//  shows: the settings of the *core that is running*, not a generic page. These
+//  three calls expose exactly the options the core declared for itself.
+// ---------------------------------------------------------------------------
+// Number of options the running core declared (0 when it declares none).
+SPHYNX_PLAYER_EXPORT int sphynx_player_option_count(SphynxPlayerHandle *p);
+// One option as "key|label|current|value1;value2;..." (values are ';'-joined,
+// never '|'-joined, so the four fields can be split on '|' safely).
+// `index` runs 0 .. count-1. Returns nullptr when out of range.
+SPHYNX_PLAYER_EXPORT const char *sphynx_player_option(SphynxPlayerHandle *p, int index);
+// Applies a value the core itself offered. Returns 1 when it was accepted and
+// the core has been told to re-read it, 0 when the key or value is not the
+// core's. The choice is remembered for this system under the save directory.
+SPHYNX_PLAYER_EXPORT int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key,
+                                                  const char *value);
+
 SPHYNX_PLAYER_EXPORT void sphynx_player_set_sound(SphynxPlayerHandle *p, int on);
 // Fast forward: run up to `multiplier` frames per tick instead of one.
 SPHYNX_PLAYER_EXPORT void sphynx_player_set_fast_forward(SphynxPlayerHandle *p, int multiplier);

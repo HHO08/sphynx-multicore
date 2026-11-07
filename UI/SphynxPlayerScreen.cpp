@@ -54,6 +54,82 @@
 #include "sphynx_ui_api.h"
 
 // ---------------------------------------------------------------------------
+//  Core options
+//
+//  SPHYNX (stage 13): inside a non-PSP game, "Settings" used to open only
+//  PPSSPP's own settings. The owner asked for what V5 shows: the options of the
+//  core that is running (JIT, screen layout, audio interpolation, region...).
+//  Those options are declared by the core itself; they are listed here exactly
+//  as PPSSPP lists its own settings - same Choice rows, same popup - and the
+//  choice is written back to the core and remembered per system.
+// ---------------------------------------------------------------------------
+class SphynxCoreOptionsScreen : public UIDialogScreen {
+public:
+	explicit SphynxCoreOptionsScreen(SphynxPlayerScreen *player) : player_(player) {}
+	const char *tag() const override { return "SphynxCoreOptions"; }
+	bool isTopLevel() const override { return false; }
+
+protected:
+	void CreateViews() override {
+		using namespace UI;
+		root_ = new LinearLayout(ORIENT_VERTICAL);
+
+		ScrollView *scroll = root_->Add(new ScrollView(ORIENT_VERTICAL, new LinearLayoutParams(1.0f)));
+		LinearLayout *items = scroll->Add(new LinearLayoutList(ORIENT_VERTICAL, new LayoutParams(FILL_PARENT, WRAP_CONTENT)));
+		items->SetSpacing(4.0f);
+
+		items->Add(new ItemHeader(StringFromFormat("%s — core options", player_->SystemName().c_str())));
+
+		const int count = player_->CoreOptionCount();
+		if (count == 0) {
+			TextView *empty = items->Add(new TextView("This core does not declare any option of its own.\nPPSSPP's own settings are under Settings."));
+			empty->SetSmall(true);
+		}
+		for (int i = 0; i < count; ++i) {
+			SphynxCoreOption option;
+			if (!player_->CoreOptionAt(i, &option)) continue;
+			Choice *row = items->Add(new Choice(
+				StringFromFormat("%s\n%s", option.label.c_str(), option.current.c_str())));
+			row->OnClick.Add([this, i](UI::EventParams &) {
+				OpenChoices(i);
+				return UI::EVENT_DONE;
+			});
+		}
+
+		items->Add(new Spacer(12.0f));
+		Choice *back = items->Add(new Choice("Back"));
+		back->OnClick.Add([this](UI::EventParams &) {
+			screenManager()->finishDialog(this, DR_OK);
+			return UI::EVENT_DONE;
+		});
+	}
+
+private:
+	void OpenChoices(int index) {
+		SphynxCoreOption option;
+		if (!player_->CoreOptionAt(index, &option)) return;
+		int selected = 0;
+		for (size_t i = 0; i < option.values.size(); ++i) {
+			if (option.values[i] == option.current) selected = static_cast<int>(i);
+		}
+		SphynxPlayerScreen *player = player_;
+		const std::string key = option.key;
+		const std::vector<std::string> values = option.values;
+		screenManager()->push(new UI::ListPopupScreen(option.label, values, selected,
+			[player, key, values](int choice) {
+				if (choice < 0 || choice >= static_cast<int>(values.size())) return;
+				std::string message;
+				if (player->SetCoreOption(key, values[choice], &message))
+					g_OSD.Show(OSDType::MESSAGE_INFO, message, 1.5f);
+				else
+					g_OSD.Show(OSDType::MESSAGE_ERROR, message, 3.0f);
+			}, true));
+	}
+
+	SphynxPlayerScreen *player_;
+};
+
+// ---------------------------------------------------------------------------
 //  Pause menu
 //
 //  Deliberately built like GamePauseScreen: a left column of save slots and a
@@ -149,6 +225,18 @@ void SphynxPauseScreen::CreateViews() {
 
 	UI::Choice *loadChoice = rightItems->Add(new Choice("Load state"));
 	loadChoice->OnClick.Handle(this, &SphynxPauseScreen::OnLoadSlot);
+
+	// SPHYNX (stage 13): two rows, because they are two different things and the
+	// owner asked for both: the running core's own options ("Core options"), and
+	// PPSSPP's own settings screen ("Settings").
+	if (player_->CoreOptionCount() > 0) {
+		UI::Choice *coreOptions = rightItems->Add(new Choice("Core options"));
+		coreOptions->OnClick.Add([this](UI::EventParams &) {
+			screenManager()->push(new SphynxCoreOptionsScreen(player_));
+			return UI::EVENT_DONE;
+		});
+		coreOptions->SetTag("coreoptions");
+	}
 
 	UI::Choice *settingsChoice = rightItems->Add(new Choice(pa->T("Settings")));
 	settingsChoice->OnClick.Handle(this, &SphynxPauseScreen::OnSettings);
@@ -479,6 +567,12 @@ void SphynxPlayerScreen::OnVirtualKey(int virtualKey, bool down) {
 	case VIRTKEY_FASTFORWARD:
 		SetFastForward(down);
 		break;
+	case VIRTKEY_TOGGLE_FULLSCREEN:
+		// Same as in a PSP game: the pad follows the new screen size because
+		// resized() rebuilds the layout.
+		if (down)
+			System_ToggleFullscreenState("");
+		break;
 	case VIRTKEY_TOGGLE_TOUCH_CONTROLS:
 		// Same code as EmuScreen's handler: a tap on a faded-out pad brings it
 		// back instead of doing nothing.
@@ -528,9 +622,12 @@ void SphynxPlayerScreen::RunFrames() {
 	frameDebt_ += dt * fps;
 	if (fastForward_) frameDebt_ += dt * fps * 2.0;   // "fast forward" = 3x total
 
-	// The cap keeps a slow device responsive: better to drop emulated frames
-	// than to freeze the UI thread that also draws the buttons.
-	int budget = 4;
+	// SPHYNX (performance, stage 13): at most two emulated frames per display
+	// frame. The old budget of four tried to "catch up" after a slow frame, which
+	// made the next frame slower still - the usual death spiral, and the reason a
+	// game that ran smoothly felt laggy here. Dropping emulated frames is the
+	// right answer: the picture and the buttons stay responsive.
+	int budget = 2;
 	while (frameDebt_ >= 1.0 && budget-- > 0) {
 		UpdatePadState();
 		controlMapper_.Update(now);
@@ -542,6 +639,9 @@ void SphynxPlayerScreen::RunFrames() {
 		}
 	}
 	if (frameDebt_ < 0.0) frameDebt_ = 0.0;
+	// Never carry more than one frame of debt: catching up is what caused the
+	// spiral above, so extra debt is simply dropped.
+	if (frameDebt_ > 2.0) frameDebt_ = 2.0;
 }
 
 void SphynxPlayerScreen::UpdatePadState() {
@@ -723,6 +823,45 @@ bool SphynxPlayerScreen::LoadState(int slot, std::string *message) {
 	// A loaded state does not emit a frame by itself. render() uploads whatever
 	// the core produces next, so the picture is refreshed by the very next
 	// rendered frame without touching the GPU from here.
+	return ok == 1;
+}
+
+int SphynxPlayerScreen::CoreOptionCount() {
+	return player_ ? sphynx_player_option_count(player_) : 0;
+}
+
+bool SphynxPlayerScreen::CoreOptionAt(int index, SphynxCoreOption *out) {
+	if (!player_ || !out) return false;
+	const char *line = sphynx_player_option(player_, index);
+	if (!line) return false;
+	const std::string text = line;
+	// key|label|current|v1;v2;v3
+	const size_t a = text.find('|');
+	const size_t b = a == std::string::npos ? std::string::npos : text.find('|', a + 1);
+	const size_t c = b == std::string::npos ? std::string::npos : text.find('|', b + 1);
+	if (a == std::string::npos || b == std::string::npos || c == std::string::npos) return false;
+	out->key = text.substr(0, a);
+	out->label = text.substr(a + 1, b - a - 1);
+	out->current = text.substr(b + 1, c - b - 1);
+	out->values.clear();
+	std::string values = text.substr(c + 1);
+	size_t start = 0;
+	while (start <= values.size()) {
+		const size_t semi = values.find(';', start);
+		out->values.push_back(values.substr(start, semi == std::string::npos ? std::string::npos : semi - start));
+		if (semi == std::string::npos) break;
+		start = semi + 1;
+	}
+	return true;
+}
+
+bool SphynxPlayerScreen::SetCoreOption(const std::string &key, const std::string &value, std::string *message) {
+	if (!player_) return false;
+	const int ok = sphynx_player_set_option(player_, key.c_str(), value.c_str());
+	if (message) {
+		*message = ok ? StringFromFormat("%s → %s", key.c_str(), value.c_str())
+		              : StringFromFormat("The core refused %s = %s", key.c_str(), value.c_str());
+	}
 	return ok == 1;
 }
 

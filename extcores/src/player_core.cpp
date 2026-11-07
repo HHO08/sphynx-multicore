@@ -24,6 +24,10 @@
 // ============================================================================
 #include "sphynx_player_api.h"
 
+// Local mkdir -p for the core-options file.
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include "sphynx_extcore.h"
 #include "sphynx_ui_api.h"
 #include "android_paths.h"
@@ -92,6 +96,23 @@ std::string SafeFileName(const std::string &name) {
 // Turns whatever the core hands us into tightly packed RGBA8888, which is the
 // only format PPSSPP's UpdateTextureLevels() accepts without a conversion step
 // in the renderer.
+// 65536 entries of "RGB565 -> RGBA8888", built once on first use. 256 KB of
+// read-only data is a cheap price for removing six operations per pixel.
+const uint32_t *RgbaFrom565Table() {
+	static uint32_t table[65536];
+	static bool built = false;
+	if (!built) {
+		for (uint32_t c = 0; c < 65536; ++c) {
+			const uint32_t r = ((c >> 11) & 0x1F) << 3;
+			const uint32_t g = ((c >> 5) & 0x3F) << 2;
+			const uint32_t b = (c & 0x1F) << 3;
+			table[c] = 0xFF000000u | (b << 16) | (g << 8) | r;
+		}
+		built = true;
+	}
+	return table;
+}
+
 class FrameCapture : public sphynx::FrameSink {
 public:
 	void OnGeometry(unsigned, unsigned, float) override {}
@@ -104,44 +125,55 @@ public:
 		if (pixels_.size() != bytes) pixels_.resize(bytes);
 		width_ = static_cast<int>(width);
 		height_ = static_cast<int>(height);
-		for (unsigned y = 0; y < height; ++y) {
-			const uint8_t *row = static_cast<const uint8_t *>(data) + y * pitch;
-			uint8_t *out = pixels_.data() + static_cast<size_t>(y) * width * 4;
-			if (format == sphynx::PixelFormat::RGB565) {
-				const uint16_t *src = reinterpret_cast<const uint16_t *>(row);
+		// SPHYNX (performance, stage 13): the per-pixel work here was the single
+		// most expensive thing in the whole player - three shifts and four byte
+		// stores per pixel, sixty times a second, on the same thread that runs the
+		// emulated CPU. Two changes, both invisible in the result:
+		//   * RGB565 goes through a 64K lookup table, so a pixel costs one load
+		//     and one 32-bit store;
+		//   * XRGB8888 is a byte swap inside a 32-bit word (three bit
+		//     operations) instead of four byte stores through an index.
+		uint8_t *dst = pixels_.data();
+		if (format == sphynx::PixelFormat::RGB565) {
+			const uint32_t *lut = RgbaFrom565Table();
+			for (unsigned y = 0; y < height; ++y) {
+				const uint16_t *src = reinterpret_cast<const uint16_t *>(
+					static_cast<const uint8_t *>(data) + y * pitch);
+				uint32_t *out = reinterpret_cast<uint32_t *>(dst + static_cast<size_t>(y) * width * 4);
+				for (unsigned x = 0; x < width; ++x) out[x] = lut[src[x]];
+			}
+		} else {
+			// XRGB8888 in memory is B,G,R,X; RGBA wants R,G,B,255. Swapping the
+			// first and third byte of every word is exactly that, and ORing in
+			// 0xFF000000 restores the alpha the core leaves as padding.
+			for (unsigned y = 0; y < height; ++y) {
+				const uint8_t *row = static_cast<const uint8_t *>(data) + y * pitch;
+				uint32_t *out = reinterpret_cast<uint32_t *>(dst + static_cast<size_t>(y) * width * 4);
 				for (unsigned x = 0; x < width; ++x) {
-					const uint16_t c = src[x];
-					const uint8_t r = static_cast<uint8_t>(((c >> 11) & 0x1F) << 3);
-					const uint8_t g = static_cast<uint8_t>(((c >> 5) & 0x3F) << 2);
-					const uint8_t b = static_cast<uint8_t>((c & 0x1F) << 3);
-					out[x * 4 + 0] = r;
-					out[x * 4 + 1] = g;
-					out[x * 4 + 2] = b;
-					out[x * 4 + 3] = 0xFF;
-				}
-			} else {
-				// XRGB8888: the fourth byte is padding, not alpha.
-				for (unsigned x = 0; x < width; ++x) {
-					out[x * 4 + 0] = row[x * 4 + 2];   // R  (core is BGRX)
-					out[x * 4 + 1] = row[x * 4 + 1];   // G
-					out[x * 4 + 2] = row[x * 4 + 0];   // B
-					out[x * 4 + 3] = 0xFF;
+					uint32_t w = 0;
+					std::memcpy(&w, row + static_cast<size_t>(x) * 4, 4);
+					w = 0xFF000000u | ((w & 0x000000FFu) << 16) | (w & 0x0000FF00u) |
+					    ((w & 0x00FF0000u) >> 16);
+					out[x] = w;
 				}
 			}
 		}
 		fresh_ = true;
 	}
 
-	// Copies the newest frame out for the renderer. Returns false when there is
-	// nothing new, which lets the screen skip a texture upload entirely.
-	bool Take(std::vector<uint8_t> *out, int *w, int *h) {
+	// SPHYNX (performance, stage 13): the frame used to be copied into a fresh
+	// std::vector on every frame - up to 4 MB of memcpy plus an allocation and a
+	// free at 60 fps. That is a large part of the stutter, and of the audio
+	// dropouts that come with it. It now hands back a pointer to the buffer it
+	// already owns; the caller copies straight into the texture upload buffer.
+	const uint8_t *Take(int *w, int *h, int *bytes) {
 		std::lock_guard<std::mutex> lock(mutex_);
-		if (!fresh_ || pixels_.empty()) return false;
-		out->assign(pixels_.begin(), pixels_.end());
+		if (!fresh_ || pixels_.empty()) return nullptr;
 		*w = width_;
 		*h = height_;
+		*bytes = static_cast<int>(pixels_.size());
 		fresh_ = false;
-		return true;
+		return pixels_.data();
 	}
 
 	// Size of the frame that is waiting (0x0 when nothing new). No copy, so the
@@ -211,6 +243,9 @@ struct SphynxPlayerHandle {
 	unsigned frame_w = 0, frame_h = 0;
 	uint64_t frames_run = 0;
 	double last_save_check = 0.0;
+	// One flattened option line, reused so sphynx_player_option() can return a
+	// const char* without allocating (see sphynx_player_api.h).
+	std::string option_line_cache;
 };
 
 namespace {
@@ -269,6 +304,71 @@ void LoadBatterySave(SphynxPlayerHandle *p) {
 	const size_t got = fread(data, 1, size, f);
 	fclose(f);
 	(void)got;
+}
+
+// ---------------------------------------------------------------------------
+//  Per-system core options on disk (stage 13)
+//
+//  <save_dir>/sphynx_core_options/<system>.ini, one "key=value" per line. Plain
+//  text, so an update never loses the choices and deleting a line returns that
+//  single option to the core's own default.
+// ---------------------------------------------------------------------------
+void EnsureDirectoryExists(const std::string &path) {
+	if (path.empty()) return;
+	struct stat st;
+	if (::stat(path.c_str(), &st) == 0) return;
+	const size_t slash = path.find_last_of('/');
+	if (slash != std::string::npos && slash > 0) EnsureDirectoryExists(path.substr(0, slash));
+	::mkdir(path.c_str(), 0777);
+}
+
+std::string OptionsFilePath(const SphynxPlayerHandle *p) {
+	if (!p || p->save_dir.empty()) return std::string();
+	return p->save_dir + "/sphynx_core_options/" +
+	       (p->system_key.empty() ? "unknown" : p->system_key) + ".ini";
+}
+
+std::vector<std::pair<std::string, std::string>> LoadOptions(const std::string &path) {
+	std::vector<std::pair<std::string, std::string>> out;
+	if (path.empty()) return out;
+	FILE *f = fopen(path.c_str(), "rb");
+	if (!f) return out;
+	char line[512];
+	while (fgets(line, sizeof(line), f)) {
+		std::string text(line);
+		while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+		const size_t eq = text.find('=');
+		if (eq == std::string::npos || eq == 0) continue;
+		out.emplace_back(text.substr(0, eq), text.substr(eq + 1));
+	}
+	fclose(f);
+	return out;
+}
+
+void SaveOptions(const std::string &path, const std::vector<sphynx::CoreOption> &options) {
+	if (path.empty()) return;
+	const size_t slash = path.find_last_of('/');
+	if (slash != std::string::npos) EnsureDirectoryExists(path.substr(0, slash));
+	FILE *f = fopen(path.c_str(), "wb");
+	if (!f) return;
+	for (const auto &option : options)
+		fprintf(f, "%s=%s\n", option.key.c_str(), option.current.c_str());
+	fclose(f);
+}
+
+// "key|label|current|v1;v2;v3" — see sphynx_player_api.h for the shape.
+std::string FlattenOption(const sphynx::CoreOption &option) {
+	std::string out = option.key;
+	out += '|';
+	out += option.label;
+	out += '|';
+	out += option.current;
+	out += '|';
+	for (size_t i = 0; i < option.values.size(); ++i) {
+		if (i) out += ';';
+		out += option.values[i];
+	}
+	return out;
 }
 
 void SetStatus(SphynxPlayerHandle *p) {
@@ -388,6 +488,11 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	// may ever decide to stop the game. Only the core itself, or the user, may.
 	p->session.SetWatchdogMs(0);
 
+	// SPHYNX (stage 13): the core declares its options during retro_init(), so the
+	// values chosen last time for this system are handed over now and applied the
+	// moment the declaration arrives.
+	p->session.EnvMutable().SetInitialOptions(LoadOptions(OptionsFilePath(p.get())));
+
 	std::string start_error;
 	if (!p->session.Start(core_path, local, system_dir, p->save_dir, &start_error)) {
 		const std::string message = start_error.empty() ? "the emulator refused this game" : start_error;
@@ -479,12 +584,11 @@ int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width, int *height) {
 int sphynx_player_take_frame(SphynxPlayerHandle *p, unsigned char *dst, int dst_size,
                              int *width, int *height) {
 	if (!p || !dst || dst_size <= 0) return 0;
-	std::vector<uint8_t> copy;
-	int w = 0, h = 0;
-	if (!p->frame.Take(&copy, &w, &h)) return 0;
-	const int needed = static_cast<int>(copy.size());
-	if (needed > dst_size) return 0;
-	std::memcpy(dst, copy.data(), copy.size());
+	int w = 0, h = 0, bytes = 0;
+	const uint8_t *src = p->frame.Take(&w, &h, &bytes);
+	if (!src || bytes <= 0) return 0;
+	if (bytes > dst_size) return 0;
+	std::memcpy(dst, src, static_cast<size_t>(bytes));
 	if (width) *width = w;
 	if (height) *height = h;
 	return 1;
@@ -559,6 +663,26 @@ const char *sphynx_player_system_name(SphynxPlayerHandle *p) {
 
 const char *sphynx_player_bios_status(SphynxPlayerHandle *p) {
 	return p ? p->bios_status.c_str() : "";
+}
+
+int sphynx_player_option_count(SphynxPlayerHandle *p) {
+	if (!p) return 0;
+	return static_cast<int>(p->session.Env().Options().size());
+}
+
+const char *sphynx_player_option(SphynxPlayerHandle *p, int index) {
+	if (!p) return nullptr;
+	const auto &options = p->session.Env().Options();
+	if (index < 0 || index >= static_cast<int>(options.size())) return nullptr;
+	p->option_line_cache = FlattenOption(options[static_cast<size_t>(index)]);
+	return p->option_line_cache.c_str();
+}
+
+int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key, const char *value) {
+	if (!p || !key || !value) return 0;
+	if (!p->session.EnvMutable().SetOption(key, value)) return 0;
+	SaveOptions(OptionsFilePath(p), p->session.Env().Options());
+	return 1;
 }
 
 void sphynx_player_set_sound(SphynxPlayerHandle *p, int on) {

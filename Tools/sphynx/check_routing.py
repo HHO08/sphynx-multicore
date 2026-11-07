@@ -236,6 +236,28 @@ def main(root: str) -> int:
         if upd >= 0 and rend >= 0 and "UploadFrame();" in text[upd:rend]:
             problems.append("UI/SphynxPlayerScreen.cpp uploads a texture from update() instead of render()")
 
+    #    e) Stage 13: the core's own options must be reachable from the pause menu,
+    #       the frame must not be copied twice, and the audio must not be started
+    #       dry (that is what the clicks were).
+    if screen.exists():
+        text = screen.read_text(encoding="utf-8", errors="surrogateescape")
+        if "Core options" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp lost the per-core options entry")
+        if "sphynx_player_option(" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp does not read the core's options")
+        if "int budget = 2;" not in text:
+            problems.append("UI/SphynxPlayerScreen.cpp runs more than two core frames per display frame again")
+    env_cb = repo / "extcores" / "src" / "env_callback.cpp"
+    if env_cb.exists():
+        text = env_cb.read_text(encoding="utf-8", errors="surrogateescape")
+        if "ParseCoreOptionDefinitions" not in text:
+            problems.append("extcores/src/env_callback.cpp throws the core's option definitions away")
+    audio = repo / "extcores" / "src" / "player_audio.cpp"
+    if audio.exists():
+        text = audio.read_text(encoding="utf-8", errors="surrogateescape")
+        if "kPrefillBuffers" not in text:
+            problems.append("extcores/src/player_audio.cpp starts the queue dry (audible clicks)")
+
     #    c) The game must not be stopped by us. The frame-budget watchdog used to
     #       kill CD-based cores on slow phones a few seconds after launch.
     player_core = repo / "extcores" / "src" / "player_core.cpp"

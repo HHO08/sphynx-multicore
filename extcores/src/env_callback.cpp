@@ -36,6 +36,127 @@ void Environment::SetVariables(const std::vector<std::pair<std::string, std::str
 	variables_ = vars;
 }
 
+// SPHYNX (stage 13): the values the user picked last time for this system. They
+// are applied before the core is initialised, so the core starts with them
+// instead of making us re-initialise it afterwards.
+void Environment::SetInitialOptions(const std::vector<std::pair<std::string, std::string>> &values) {
+	initial_options_ = values;
+}
+
+bool Environment::SetOption(const std::string &key, const std::string &value) {
+	for (CoreOption &option : options_) {
+		if (option.key != key) continue;
+		bool known = false;
+		for (const std::string &v : option.values) {
+			if (v == value) known = true;
+		}
+		if (!known) return false;
+		if (option.current == value) return true;   // nothing to do, still valid
+		option.current = value;
+		// Mirror it into the plain variable map, which is what GET_VARIABLE
+		// reads: that is the contract the core actually implements.
+		bool mirrored = false;
+		for (auto &kv : variables_) {
+			if (kv.first == key) {
+				kv.second = value;
+				mirrored = true;
+			}
+		}
+		if (!mirrored) variables_.emplace_back(key, value);
+		option_changed_ = true;
+		return true;
+	}
+	// A variable the core never declared as a "core option" but does read
+	// (old-style SET_VARIABLES only): accept it if we know the key at all.
+	for (auto &kv : variables_) {
+		if (kv.first == key) {
+			kv.second = value;
+			option_changed_ = true;
+			return true;
+		}
+	}
+	return false;
+}
+
+void Environment::ApplyInitialOptions() {
+	for (auto &option : options_) {
+		for (const auto &kv : initial_options_) {
+			if (kv.first != option.key) continue;
+			bool known = false;
+			for (const std::string &v : option.values) {
+				if (v == kv.second) known = true;
+			}
+			if (known) option.current = kv.second;
+		}
+		// Whatever ended up current must also be what GET_VARIABLE answers, or
+		// the core and the UI would disagree from the first frame.
+		bool mirrored = false;
+		for (auto &pair : variables_) {
+			if (pair.first == option.key) {
+				pair.second = option.current;
+				mirrored = true;
+			}
+		}
+		if (!mirrored) variables_.emplace_back(option.key, option.current);
+	}
+}
+
+bool Environment::TakeOptionChanged() {
+	const bool changed = option_changed_;
+	option_changed_ = false;
+	return changed;
+}
+
+namespace {
+// "key; Value A|Value B|Value C" is the old SET_VARIABLES spelling.
+void ParseVariableList(const retro_variable *list, std::vector<CoreOption> *out) {
+	if (!list) return;
+	for (const retro_variable *v = list; v->key != nullptr; ++v) {
+		CoreOption option;
+		option.key = v->key;
+		const std::string packed = v->value ? v->value : "";
+		const size_t semi = packed.find(';');
+		std::string values = packed;
+		if (semi != std::string::npos) {
+			option.label = packed.substr(0, semi);
+			// The label is conventionally "Display name" - trim spaces.
+			while (!option.label.empty() && option.label.back() == ' ') option.label.pop_back();
+			while (!option.label.empty() && option.label.front() == ' ') option.label.erase(option.label.begin());
+			values = packed.substr(semi + 1);
+		}
+		while (!values.empty() && values.front() == ' ') values.erase(values.begin());
+		size_t start = 0;
+		while (start <= values.size()) {
+			const size_t bar = values.find('|', start);
+			std::string item = values.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+			while (!item.empty() && item.back() == ' ') item.pop_back();
+			if (!item.empty()) option.values.push_back(item);
+			if (bar == std::string::npos) break;
+			start = bar + 1;
+		}
+		if (option.label.empty()) option.label = option.key;
+		if (!option.values.empty()) option.current = option.values.front();
+		out->push_back(option);
+	}
+}
+
+// The newer SET_CORE_OPTIONS form: one entry per option, values in a table.
+void ParseCoreOptionDefinitions(const retro_core_option_definition *defs, std::vector<CoreOption> *out) {
+	if (!defs) return;
+	for (const retro_core_option_definition *d = defs; d->key != nullptr; ++d) {
+		CoreOption option;
+		option.key = d->key;
+		option.label = d->desc ? d->desc : d->key;
+		for (int i = 0; i < RETRO_NUM_CORE_OPTION_VALUES_MAX; ++i) {
+			if (d->values[i].value == nullptr) break;
+			option.values.push_back(d->values[i].value);
+		}
+		if (!option.values.empty()) option.current = option.values.front();
+		if (!option.values.empty()) out->push_back(option);
+	}
+}
+}  // namespace
+
 namespace {
 // One external core per process, so the active instance is a single slot. The
 // slot is only read under the session lock (see ui_api/Session), but a core may
@@ -86,15 +207,19 @@ bool Environment::Callback(unsigned cmd, void *data, void *) {
 	}
 
 	// --- core options (the Settings screen depends on this) -----------------
-	case RETRO_ENVIRONMENT_SET_VARIABLES:
+	case RETRO_ENVIRONMENT_SET_VARIABLES: {
+		// SPHYNX (stage 13): keep the declarations. They are the rows the player's
+		// "Core options" screen shows, and the only place the allowed values are
+		// known, so an unknown value can be refused instead of passed on.
+		options_.clear();
+		ParseVariableList(static_cast<const retro_variable *>(data), &options_);
+		ApplyInitialOptions();
+		return true;
+	}
 	case RETRO_ENVIRONMENT_SET_CORE_OPTIONS: {
-		// We keep only what we can render in PPSSPP's own Settings list; the
-		// full option set is still served verbatim through GET_VARIABLE.
-		if (cmd == RETRO_ENVIRONMENT_SET_CORE_OPTIONS && data) {
-			const retro_core_option_display *display =
-				static_cast<const retro_core_option_display *>(data);
-			(void)display;
-		}
+		options_.clear();
+		ParseCoreOptionDefinitions(static_cast<const retro_core_option_definition *>(data), &options_);
+		ApplyInitialOptions();
 		return true;
 	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE: {
@@ -111,8 +236,10 @@ bool Environment::Callback(unsigned cmd, void *data, void *) {
 		return false;
 	}
 	case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: {
+		// True exactly once after the UI changed an option, which is how a core
+		// knows to apply it without being restarted.
 		if (!data) return false;
-		*static_cast<bool *>(data) = false;
+		*static_cast<bool *>(data) = TakeOptionChanged();
 		return true;
 	}
 

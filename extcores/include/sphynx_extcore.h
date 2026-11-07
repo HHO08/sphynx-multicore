@@ -233,6 +233,17 @@ public:
 // 6. Environment callback (retro_environment)
 // ---------------------------------------------------------------------------
 
+// One option a core declares for itself ("JIT", "Screen layout", "Region"...).
+// SPHYNX (stage 13): these used to be thrown away, which is why the Settings
+// screen inside a game showed nothing core-specific. They are now kept, shown in
+// PPSSPP's own list and written back through GET_VARIABLE.
+struct CoreOption {
+	std::string key;
+	std::string label;
+	std::vector<std::string> values;
+	std::string current;   // what the core will receive
+};
+
 // Translates libretro environment calls into Sphynx state. Unknown commands are
 // logged and answered with `false`, which is what a well-behaved core expects.
 class Environment {
@@ -242,6 +253,16 @@ public:
 
 	void SetDirectories(const std::string &system_dir, const std::string &save_dir);
 	void SetVariables(const std::vector<std::pair<std::string, std::string>> &vars);
+
+	// --- core options (stage 13) -------------------------------------------
+	// Values the user has chosen for this system, restored before the core sees
+	// them, and reported back to the UI afterwards.
+	void SetInitialOptions(const std::vector<std::pair<std::string, std::string>> &values);
+	const std::vector<CoreOption> &Options() const { return options_; }
+	// Returns false when the key is unknown or the value is not offered by the
+	// core; a false here means the UI must not claim the change happened.
+	bool SetOption(const std::string &key, const std::string &value);
+	bool TakeOptionChanged();   // consumes the "core must re-read" flag
 	void SetPixelFormat(PixelFormat fmt) { pixel_format_ = fmt; }
 	PixelFormat GetPixelFormat() const { return pixel_format_; }
 	int UnknownCommands() const { return unknown_commands_; }
@@ -263,6 +284,11 @@ private:
 	bool Callback(unsigned cmd, void *data, void *userdata);
 	std::string system_dir_, save_dir_;
 	std::vector<std::pair<std::string, std::string>> variables_;
+	std::vector<CoreOption> options_;
+	std::vector<std::pair<std::string, std::string>> initial_options_;
+	bool option_changed_ = false;
+	// Puts the remembered values onto freshly declared options.
+	void ApplyInitialOptions();
 	PixelFormat pixel_format_ = PixelFormat::RGB565;
 	unsigned geom_w_ = 0, geom_h_ = 0;
 	float aspect_ = 0.0f;
@@ -327,6 +353,7 @@ public:
 	// core has none.
 	void *MemoryData(unsigned id, size_t *size);
 	const Environment &Env() const { return env_; }
+	Environment &EnvMutable() { return env_; }
 	bool LastRunFailed() const { return last_run_failed_; }
 	const char *LastError() const { return error_.c_str(); }
 

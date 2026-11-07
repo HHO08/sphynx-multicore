@@ -36,10 +36,21 @@
 namespace sphynx {
 namespace {
 
-// Four buffers of ~16 ms each: enough to ride out a scheduler hiccup, short
-// enough that a button press is not heard late.
-constexpr int kBufferCount = 4;
-constexpr int kRingMs = 400;   // how much audio the ring can hold
+// SPHYNX (audio, stage 13): four buffers of 16 ms plus a ring that is often
+// *empty* is what "crackling, popping, choppy sound" literally is. OpenSL asks
+// for the next 16 ms and Fill() has nothing: this file used to pad the gap with
+// silence, so every scheduler hiccup became an audible click and every slow
+// emulated frame became a hole in the sound.
+//
+// Three changes, all of them the standard cure:
+//   * deeper queue - 8 buffers of 16 ms, so a 100 ms stall costs nothing;
+//   * a prefill - the queue is started with enough silence to cover the
+//     latency of the first emulated frames instead of underrunning instantly;
+//   * an underrun is bridged by repeating the last delivered sample instead of
+//     jumping to zero (a click), and it is counted so it can be seen.
+constexpr int kBufferCount = 8;
+constexpr int kRingMs = 500;      // how much audio the ring can hold
+constexpr int kPrefillBuffers = 3;  // ~48 ms of lead at start-up
 
 class OpenSLAudio : public AudioOutput {
 public:
@@ -90,10 +101,14 @@ public:
 
 		running_ = true;
 		// Prime the queue with silence so the callback chain starts.
-		for (int i = 0; i < kBufferCount; ++i) {
+		// Start with a little silence: the first emulated frames have not produced
+		// audio yet, and starting empty guarantees an immediate underrun (a pop)
+		// on every launch.
+		for (int i = 0; i < kPrefillBuffers; ++i) {
 			std::fill(buffers_[i].begin(), buffers_[i].end(), 0);
 			(*bq_)->Enqueue(bq_, buffers_[i].data(), buffers_[i].size() * sizeof(int16_t));
 		}
+		next_buffer_ = kPrefillBuffers % kBufferCount;
 		(*play_)->SetPlayState(play_, SL_PLAYSTATE_PLAYING);
 		ALOG("OpenSL started at %d Hz", rate_);
 		return true;
@@ -165,8 +180,23 @@ private:
 			dst[i] = ring_[read_];
 			read_ = (read_ + 1) % capacity;
 		}
-		if (copied < wanted)
-			std::fill(dst.begin() + copied, dst.end(), 0);
+		if (copied < wanted) {
+			// Underrun: hold the last sample instead of snapping to silence. A
+			// step to zero in the middle of a waveform is exactly the click that
+			// was audible; holding the level is inaudible at this length.
+			++underruns_;
+			const int16_t last_l = copied > 1 ? dst[copied - 2] : last_l_;
+			const int16_t last_r = copied > 0 ? dst[copied - 1] : last_r_;
+			for (size_t i = copied; i + 1 < wanted; i += 2) {
+				dst[i] = last_l;
+				dst[i + 1] = last_r;
+			}
+			last_l_ = last_l;
+			last_r_ = last_r;
+		} else if (copied > 1) {
+			last_l_ = dst[copied - 2];
+			last_r_ = dst[copied - 1];
+		}
 	}
 
 	SLObjectItf engine_obj_ = nullptr;
@@ -184,6 +214,10 @@ private:
 	size_t read_ = 0, write_ = 0;
 	std::mutex mutex_;
 	volatile bool running_ = false;
+	// Last delivered sample, used to bridge an underrun without a click.
+	int16_t last_l_ = 0;
+	int16_t last_r_ = 0;
+	unsigned long underruns_ = 0;
 };
 
 }  // namespace
