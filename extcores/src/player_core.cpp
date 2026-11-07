@@ -32,6 +32,7 @@
 #include "sphynx_ui_api.h"
 #include "android_paths.h"
 #include "bios_layout.h"
+#include "core_defaults.h"
 #include "diag_log.h"
 #include "player_audio.h"
 #include "state_file.h"
@@ -54,11 +55,22 @@
 namespace {
 
 // libretro only has one active environment per process (see env_callback.cpp),
-// so exactly one external core may run at a time. The screen respects this by
-// closing the old player before opening a new one; this flag turns a mistake
-// into a readable error instead of two cores fighting over the same globals.
+// so exactly one external core may run at a time.
+//
+// SPHYNX (stage 15): this used to be a plain bool, and a player that was never
+// closed - a screen replaced while its game was still open, an exit path that
+// skipped the destructor - left it set forever. Every later game then refused
+// to start with "another game is already running", which is exactly the message
+// the owner photographed, and only restarting the app cleared it.
+//
+// It is now the active handle itself. Opening a game *repairs* the situation:
+// whatever was left behind is stopped and marked dead instead of blocking the
+// new game. A handle is only freed by its own sphynx_player_close(), so the
+// screen that still points at it never sees a dangling pointer.
 std::mutex g_one_core_mutex;
-bool g_core_active = false;
+std::atomic<SphynxPlayerHandle *> g_active_handle{nullptr};
+
+void StopWorker(SphynxPlayerHandle *p);   // defined below, needs the layout
 
 std::string BaseNameOf(const std::string &path) {
 	const size_t slash = path.find_last_of("/\\");
@@ -236,11 +248,23 @@ struct SphynxPlayerHandle {
 	std::string status;
 	std::string error;
 	std::string bios_status;
+	// Detailed "which file is really in the folder" report (stage 15). It is
+	// what the player shows when a core starts but never draws a picture.
+	std::string bios_report;
 
 	std::atomic<unsigned> buttons{0};
 	std::atomic<float> lx{0.0f}, ly{0.0f}, rx{0.0f}, ry{0.0f};
 	std::atomic<int> fast_forward{1};
-	bool sound = true;
+	// Written by the UI thread, read by the emulation thread: atomic, not bool.
+	std::atomic<bool> sound{true};
+
+	// SPHYNX (stage 15): set once the emulation thread has been asked to leave
+	// and has returned. A dead handle answers every call with "stopped" but is
+	// still a valid pointer until its owner calls sphynx_player_close().
+	std::atomic<bool> dead{false};
+	// Serialises shutdown, so a reclaim from one thread and the owner's own
+	// close from another cannot both join() the same thread.
+	std::mutex close_mutex;
 
 	double fps = 60.0;
 	unsigned frame_w = 0, frame_h = 0;
@@ -279,6 +303,18 @@ struct SphynxPlayerHandle {
 };
 
 namespace {
+
+// SPHYNX (stage 15): stops the emulation thread and marks the handle dead.
+// Idempotent, and safe to call from the UI thread at any time - the worker
+// saves the battery RAM and stops the core itself before it returns, so this is
+// the only correct way to end a session.
+void StopWorker(SphynxPlayerHandle *p) {
+	if (!p) return;
+	std::lock_guard<std::mutex> lock(p->close_mutex);
+	p->quit = true;
+	if (p->worker.joinable()) p->worker.join();
+	p->dead = true;
+}
 
 // PPSSPP pad bits -> libretro RetroPad ids. This is the standard mapping every
 // frontend uses: the pad's X (cross) is the primary action (B), circle is (A).
@@ -438,9 +474,12 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 	if (rate <= 20.0 || rate > 200.0) rate = 60.0;
 	const double frame_time = 1.0 / rate;
 
+	bool device_on = false;
 	if (!p->audio_out->Start(p->session.SampleRate())) {
 		// Silent playback is a fine outcome; refusing to play is not.
 		sphynx::LogLine("player: audio device could not be opened, continuing silently");
+	} else {
+		device_on = true;
 	}
 
 	// The core's battery RAM is read here, on the core thread, immediately after
@@ -471,6 +510,23 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 			fps_window = Clock::now();
 			frames_in_window = 0;
 			continue;
+		}
+
+		// SPHYNX (stage 15 audio): sound on/off is applied here, on the thread
+		// that owns the device (see sphynx_player_set_sound). Switching it off
+		// stops the device so nothing is drained in the background; switching it
+		// on starts it again at the core's own sample rate.
+		{
+			const bool want = p->sound.load(std::memory_order_relaxed);
+			if (want != device_on) {
+				if (want) {
+					device_on = p->audio_out->Start(p->session.SampleRate());
+					if (!device_on) sphynx::LogLine("player: audio device could not be reopened");
+				} else {
+					p->audio_out->Stop();
+					device_on = false;
+				}
+			}
 		}
 
 		// Fast-forward multiplies how many emulated frames one tick runs.
@@ -520,10 +576,30 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 			SetStatus(p);
 		}
 
+		// SPHYNX (stage 15 audio): follow the audio clock as well as the frame
+		// clock. A 60 Hz picture and a 44100 Hz device are two independent
+		// clocks: pacing on the frame clock alone means the queue slowly fills
+		// or slowly empties, and a minute into the game that turns into the
+		// crackle/pop the owner reported on most cores. Watching how much audio
+		// is queued and bending the frame period by up to 3% (16.7 ms -> 16.2
+		// or 17.2 ms, invisible) keeps the two clocks together with no
+		// resampling and no dropped samples.
+		double speed = 1.0;
+		if (p->sound.load(std::memory_order_relaxed) && p->audio_out &&
+		    p->audio_out->IsRunning()) {
+			const size_t queued = p->audio_out->BufferedFrames();
+			const double rate = p->session.SampleRate();
+			if (rate > 1000.0) {
+				const double queued_ms = static_cast<double>(queued) * 1000.0 / rate;
+				if (queued_ms > 90.0) speed = 0.97;        // too much queued: slow down
+				else if (queued_ms < 20.0) speed = 1.03;   // about to starve: speed up
+			}
+		}
+
 		// Sleep until the next frame is due. A core that is slower than real time
 		// simply never sleeps - it is not our job to drop its frames here.
 		next_frame += std::chrono::duration_cast<Clock::duration>(
-			std::chrono::duration<double>(frame_time * loops));
+			std::chrono::duration<double>(frame_time * loops / speed));
 		const auto after = Clock::now();
 		if (next_frame > after) {
 			std::this_thread::sleep_until(next_frame);
@@ -559,7 +635,16 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	if (!path || !*path) return fail("no game file was given");
 
 	std::lock_guard<std::mutex> one_core(g_one_core_mutex);
-	if (g_core_active) return fail("another game is already running");
+	// SPHYNX (stage 15): no more "another game is already running". A core left
+	// behind by a screen that never closed it is stopped here and marked dead,
+	// and the game the user just tapped starts normally. The old handle keeps
+	// its memory until its own close() runs, so no pointer goes stale.
+	if (SphynxPlayerHandle *stale = g_active_handle.load()) {
+		sphynx::LogLine("player: stopping a previous core that was left open (self-repair)");
+		StopWorker(stale);
+		SphynxPlayerHandle *expected = stale;
+		g_active_handle.compare_exchange_strong(expected, nullptr);
+	}
 
 	// 1. A core can only fopen() a real file, so an Android content:// URI has
 	//    to become one first. This is the step that made every SAF-picked game
@@ -596,10 +681,21 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	p->save_dir = sphynx_ui_save_dir();
 	if (p->save_dir.empty()) return fail("no save directory is known");
 
+	// SPHYNX (stage 15): before the core is loaded, give its BIOS folder the
+	// exact file names it opens. This is what turns "I put the BIOS files there
+	// and the Nintendo DS still shows white screens" into a working game: the
+	// core uses a case-sensitive fopen("bios7.bin"), and "BIOS7.BIN" or
+	// "nds_bios7.bin" was invisible to it. Nothing is deleted; a wrong-cased
+	// name is renamed in place, and a prefixed one is copied under the exact
+	// name next to it.
+	sphynx_ui_prepare_bios(sys->key);
 	char *bios_dir = sphynx_ui_bios_dir_for_system(sys->key);
 	const std::string system_dir = bios_dir ? bios_dir : std::string(sphynx_ui_system_dir());
 	sphynx_ui_free(bios_dir);
 	p->bios_status = sphynx_ui_bios_status(sys->key);
+	char *bios_report = sphynx_ui_bios_report(sys->key);
+	p->bios_report = bios_report ? bios_report : "";
+	sphynx_ui_free(bios_report);
 
 	// 4. Hand the pads outward, then start.
 	p->session.SetFrameSink(&p->frame);
@@ -655,6 +751,10 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	// values chosen last time for this system are handed over now and applied the
 	// moment the declaration arrives.
 	p->session.EnvMutable().SetInitialOptions(LoadOptions(OptionsFilePath(p.get())));
+	// SPHYNX (stage 15): and, for everything the user never chose, the best
+	// value this build knows for this core (see core_defaults.h). Applied while
+	// the core declares its options, i.e. before it starts running.
+	p->session.EnvMutable().SetRecommendations(p->core_tag);
 
 	// 5. Battery save path first: the worker writes it while it runs.
 	p->sram_path = sphynx::StateFilePath(p->save_dir, p->game_tag + ".sram", 0);
@@ -693,10 +793,19 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	// LoadBatterySave() reads core memory, so it happens on the core thread
 	// (inside Session::Start's caller) - see PlayerWorker.
 
-	g_core_active = true;
+	g_active_handle.store(handle);
 	handle->status = handle->system_name;
 	SetStatus(handle);
 	sphynx::LogLine("PLAYER: opened " + local + " (" + handle->system_key + " / " + handle->core_tag + ")");
+	// The two things a bug report about "it does not start" or "it lags" needs:
+	// which BIOS files the core can really see, and which settings it started
+	// with. Both are written to PSP/sphynx_log.txt and shown on screen.
+	sphynx::LogLine("  bios: " + handle->bios_report);
+	if (handle->session.Env().RecommendedCount() > 0) {
+		sphynx::LogLine("  recommended settings applied: " +
+		                std::to_string(handle->session.Env().RecommendedCount()) + " of " +
+		                std::to_string(handle->session.Env().Options().size()));
+	}
 	return handle;
 }
 
@@ -705,11 +814,13 @@ void sphynx_player_close(SphynxPlayerHandle *p) {
 	// Ask the emulation thread to leave; it saves the battery RAM and stops the
 	// core and the audio device itself, because those may only be touched from
 	// the thread that started them. Only after it has returned may we delete.
-	p->quit = true;
-	if (p->worker.joinable()) p->worker.join();
+	// A handle that was already stopped (by a reclaim in sphynx_player_open, or
+	// by an earlier close) is simply freed: StopWorker() is idempotent.
+	StopWorker(p);
 	{
 		std::lock_guard<std::mutex> one_core(g_one_core_mutex);
-		g_core_active = false;
+		SphynxPlayerHandle *expected = p;
+		g_active_handle.compare_exchange_strong(expected, nullptr);
 	}
 	delete p;
 }
@@ -719,23 +830,26 @@ int sphynx_player_run(SphynxPlayerHandle *p) {
 	// only reports how it is doing. The screen still calls it once per update,
 	// which keeps the UI code unchanged: 1 = running, 0 = paused, -1 = stopped
 	// with a reason in sphynx_player_status().
+	// SPHYNX (stage 15): a handle that a newer game reclaimed (see
+	// sphynx_player_open) reports "stopped" here, never a dangling read.
 	if (!p) return 0;
+	if (p->dead.load()) return -1;
 	if (p->failed.load()) return -1;
 	if (p->paused.load()) return 0;
 	return 1;
 }
 
 void sphynx_player_set_paused(SphynxPlayerHandle *p, int paused) {
-	if (!p) return;
+	if (!p || p->dead.load()) return;
 	p->paused = paused != 0;
 }
 
 double sphynx_player_measured_fps(SphynxPlayerHandle *p) {
-	return p ? p->measured_fps.load() : 0.0;
+	return (p && !p->dead.load()) ? p->measured_fps.load() : 0.0;
 }
 
 double sphynx_player_frame_ms(SphynxPlayerHandle *p) {
-	return p ? p->frame_ms.load() : 0.0;
+	return (p && !p->dead.load()) ? p->frame_ms.load() : 0.0;
 }
 
 // Reports the size of the frame waiting in the queue without consuming it, so the
@@ -743,7 +857,7 @@ double sphynx_player_frame_ms(SphynxPlayerHandle *p) {
 int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width, int *height) {
 	if (width) *width = 0;
 	if (height) *height = 0;
-	if (!p) return 0;
+	if (!p || p->dead.load()) return 0;
 	int w = 0, h = 0;
 	p->frame.Peek(&w, &h);
 	if (width) *width = w;
@@ -753,7 +867,7 @@ int sphynx_player_frame_size(SphynxPlayerHandle *p, int *width, int *height) {
 
 int sphynx_player_take_frame(SphynxPlayerHandle *p, unsigned char *dst, int dst_size,
                              int *width, int *height) {
-	if (!p || !dst || dst_size <= 0) return 0;
+	if (!p || p->dead.load() || !dst || dst_size <= 0) return 0;
 	int w = 0, h = 0, bytes = 0;
 	const uint8_t *src = p->frame.Take(&w, &h, &bytes);
 	if (!src || bytes <= 0) return 0;
@@ -766,7 +880,7 @@ int sphynx_player_take_frame(SphynxPlayerHandle *p, unsigned char *dst, int dst_
 
 void sphynx_player_set_pad(SphynxPlayerHandle *p, unsigned buttons,
                            float lx, float ly, float rx, float ry) {
-	if (!p) return;
+	if (!p || p->dead.load()) return;
 	p->buttons.store(buttons, std::memory_order_relaxed);
 	p->lx.store(lx, std::memory_order_relaxed);
 	p->ly.store(ly, std::memory_order_relaxed);
@@ -775,7 +889,7 @@ void sphynx_player_set_pad(SphynxPlayerHandle *p, unsigned buttons,
 }
 
 int sphynx_player_save_state(SphynxPlayerHandle *p, int slot, char *msg, size_t msg_size) {
-	if (!p) return 0;
+	if (!p || p->dead.load()) return 0;
 	// Serialised with the emulation thread: core memory is not re-entrant.
 	std::lock_guard<std::mutex> lock(p->session_mutex);
 	std::vector<uint8_t> state;
@@ -795,7 +909,7 @@ int sphynx_player_save_state(SphynxPlayerHandle *p, int slot, char *msg, size_t 
 }
 
 int sphynx_player_load_state(SphynxPlayerHandle *p, int slot, char *msg, size_t msg_size) {
-	if (!p) return 0;
+	if (!p || p->dead.load()) return 0;
 	// Serialised with the emulation thread: core memory is not re-entrant.
 	std::lock_guard<std::mutex> lock(p->session_mutex);
 	const std::string path = sphynx::StateFilePath(p->save_dir, p->game_tag, slot);
@@ -815,29 +929,38 @@ int sphynx_player_load_state(SphynxPlayerHandle *p, int slot, char *msg, size_t 
 }
 
 int sphynx_player_state_exists(SphynxPlayerHandle *p, int slot) {
-	if (!p) return 0;
+	if (!p || p->dead.load()) return 0;
 	// Serialised with the emulation thread: core memory is not re-entrant.
 	std::lock_guard<std::mutex> lock(p->session_mutex);
 	return sphynx::StateFileExists(sphynx::StateFilePath(p->save_dir, p->game_tag, slot)) ? 1 : 0;
 }
 
 void sphynx_player_flush_save(SphynxPlayerHandle *p) {
-	if (!p) return;
+	if (!p || p->dead.load()) return;
 	// Serialised with the emulation thread: core memory is not re-entrant.
 	std::lock_guard<std::mutex> lock(p->session_mutex);
 	FlushBatterySave(p);
 }
 
 double sphynx_player_fps(SphynxPlayerHandle *p) {
-	return p ? p->fps : 60.0;
+	return (p && !p->dead.load()) ? p->fps : 60.0;
 }
 
 const char *sphynx_player_status(SphynxPlayerHandle *p) {
-	return p ? p->status.c_str() : "";
+	if (!p) return "";
+	return p->dead.load() ? "this game was closed" : p->status.c_str();
 }
 
 const char *sphynx_player_system_name(SphynxPlayerHandle *p) {
 	return p ? p->system_name.c_str() : "";
+}
+
+const char *sphynx_player_bios_report(SphynxPlayerHandle *p) {
+	// SPHYNX (stage 15): the files the core's own system folder really holds.
+	// This is the answer to "I installed the BIOS/firmware and the game still
+	// does not start": it names the folder, what was found (with sizes) and what
+	// is missing, instead of leaving the user to guess.
+	return p ? p->bios_report.c_str() : "";
 }
 
 const char *sphynx_player_bios_status(SphynxPlayerHandle *p) {
@@ -845,12 +968,13 @@ const char *sphynx_player_bios_status(SphynxPlayerHandle *p) {
 }
 
 int sphynx_player_option_count(SphynxPlayerHandle *p) {
-	if (!p) return 0;
+	if (!p || p->dead.load()) return 0;
 	return static_cast<int>(p->session.Env().Options().size());
 }
 
 const char *sphynx_player_option(SphynxPlayerHandle *p, int index) {
 	if (!p) return nullptr;
+	if (p->dead.load()) return nullptr;
 	const auto &options = p->session.Env().Options();
 	if (index < 0 || index >= static_cast<int>(options.size())) return nullptr;
 	p->option_line_cache = FlattenOption(options[static_cast<size_t>(index)]);
@@ -858,7 +982,7 @@ const char *sphynx_player_option(SphynxPlayerHandle *p, int index) {
 }
 
 int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key, const char *value) {
-	if (!p) return 0;
+	if (!p || p->dead.load()) return 0;
 	// Serialised with the emulation thread: core memory is not re-entrant.
 	std::lock_guard<std::mutex> lock(p->session_mutex);
 	if (!key || !value) return 0;
@@ -868,18 +992,16 @@ int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key, const char 
 }
 
 void sphynx_player_set_sound(SphynxPlayerHandle *p, int on) {
-	if (!p) return;
-	p->sound = on != 0;
-	if (p->sound) {
-		if (p->audio_out && !p->audio_out->IsRunning())
-			p->audio_out->Start(p->session.SampleRate());
-	} else if (p->audio_out) {
-		p->audio_out->Stop();
-	}
+	if (!p || p->dead.load()) return;
+	// SPHYNX (stage 15 audio): only the flag is written here. Starting and
+	// stopping an OpenSL device from the UI thread while the emulation thread is
+	// pushing into it is a data race with a crash at the end of it; the
+	// emulation thread now notices the flag and does it, one frame later.
+	p->sound.store(on != 0, std::memory_order_relaxed);
 }
 
 void sphynx_player_set_fast_forward(SphynxPlayerHandle *p, int multiplier) {
-	if (!p) return;
+	if (!p || p->dead.load()) return;
 	p->fast_forward.store(multiplier > 0 ? multiplier : 1, std::memory_order_relaxed);
 }
 

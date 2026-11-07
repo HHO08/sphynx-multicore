@@ -321,6 +321,10 @@ UI::EventReturn SphynxPauseScreen::OnExit(UI::EventParams &e) {
 	// Close the menu, then the player: the game list is right behind it, so the
 	// user lands where PPSSPP itself would have left them.
 	player_->FlushSave();
+	// SPHYNX (stage 15): close this dialog *before* leaving, so the pause menu is
+	// not left on the screen stack holding a pointer to a player that is about
+	// to be destroyed. Leaving it there is how a stale game stayed "open".
+	screenManager()->finishDialog(this, DR_OK);
 	// Same destination PPSSPP's own pause menu uses: the game list.
 	screenManager()->switchScreen(new MainScreen());
 	return UI::EVENT_DONE;
@@ -355,11 +359,7 @@ SphynxPlayerScreen::~SphynxPlayerScreen() {
 		g_Config.bShowTouchControls = false;
 		padForcedOn_ = false;
 	}
-	if (player_) {
-		sphynx_player_flush_save(player_);
-		sphynx_player_close(player_);
-		player_ = nullptr;
-	}
+	ClosePlayer();
 	// Drop the texture while the draw context is still alive; textures are
 	// ref-counted here, so releasing our reference is the deletion.
 	if (texture_ && screenManager() && screenManager()->getDrawContext()) {
@@ -488,8 +488,19 @@ void SphynxPlayerScreen::update() {
 	}
 }
 
+void SphynxPlayerScreen::ClosePlayer() {
+	if (!player_) return;
+	sphynx_player_flush_save(player_);
+	sphynx_player_close(player_);
+	player_ = nullptr;
+}
+
 void SphynxPlayerScreen::StartGame() {
 	started_ = true;
+	// SPHYNX (stage 15): one screen, one player. Anything this screen already
+	// holds is closed first, so the host can never answer "another game is
+	// already running" to a game the user just tapped.
+	ClosePlayer();
 
 	// The detector is the same one the game list uses, so a file that is shown
 	// with an icon can always be started as well.
@@ -554,6 +565,7 @@ void SphynxPlayerScreen::ChooseSystem(const std::vector<std::string> &keys, cons
 		[this, path, keys](int choice) {
 			if (choice < 0 || choice >= (int)keys.size())
 				return;
+			ClosePlayer();   // stage 15: same rule as StartGame()
 			char err[512] = {};
 			player_ = sphynx_player_open(path.ToString().c_str(), keys[choice].c_str(), err, sizeof(err));
 			if (!player_) {
@@ -621,11 +633,16 @@ void SphynxPlayerScreen::RunFrames() {
 	// thread reports both numbers.
 	if (!frameSeen_ && !noFrameWarned_ && startTime_ > 0.0 && time_now_d() - startTime_ > 4.0) {
 		noFrameWarned_ = true;
-		char why[256];
-		std::snprintf(why, sizeof(why), "No picture yet — %.1f fps, %.1f ms/frame, %s",
-		              sphynx_player_measured_fps(player_), sphynx_player_frame_ms(player_),
-		              sphynx_player_status(player_));
-		g_OSD.Show(OSDType::MESSAGE_WARNING, why, 5.0f);
+		// SPHYNX (stage 15): when a core starts but never draws, the first
+		// question is always "does it see its BIOS?". The answer is on the same
+		// line as the measurements, so a single screenshot says whether the
+		// folder is wrong or the core is.
+		std::string why = StringFromFormat("No picture yet — %.1f fps, %.1f ms/frame, %s\n%s",
+		                                   sphynx_player_measured_fps(player_),
+		                                   sphynx_player_frame_ms(player_),
+		                                   sphynx_player_status(player_),
+		                                   sphynx_player_bios_report(player_));
+		g_OSD.Show(OSDType::MESSAGE_WARNING, why, 8.0f);
 		sphynx_ui_log_line((std::string("player screen: no frames after 4 s: ") + why).c_str());
 	}
 }
@@ -743,7 +760,13 @@ void SphynxPlayerScreen::ShowProblem(const std::string &title, const std::string
 	heading->SetTextColor(0xFFE8E8E8);
 	heading->SetShadow(true);
 
-	TextView *body = panel->Add(new TextView(StringFromFormat("%s\n\nBuild: %s", detail.c_str(), PPSSPP_GIT_VERSION)));
+	// SPHYNX (stage 15): what the core's BIOS folder really holds. For a system
+	// that cannot boot without BIOS this line is the answer, right under the
+	// error, without opening a file manager.
+	std::string body_text = StringFromFormat("%s\n\nBuild: %s", detail.c_str(), PPSSPP_GIT_VERSION);
+	if (player_)
+		body_text += StringFromFormat("\nBIOS: %s", sphynx_player_bios_report(player_));
+	TextView *body = panel->Add(new TextView(body_text));
 	body->SetSmall(true);
 	body->SetTextColor(0xFFB8B8B8);
 
@@ -778,8 +801,17 @@ void SphynxPlayerScreen::UpdateStatusLine() {
 	// delivers per second, and how long one emulated frame takes. Both are
 	// measured on the core thread, so they can be compared with V5's behaviour
 	// instead of described by feel.
+	// SPHYNX (stage 15): one extra field, "bios ok" / "bios x", only for the
+	// systems that have a BIOS folder. It is the difference between "the core is
+	// slow" and "the core has no BIOS" on a screenshot.
+	std::string bios_field;
+	if (player_) {
+		const std::string status = sphynx_player_bios_status(player_);
+		if (!status.empty() && status != "no BIOS needed")
+			bios_field = std::string(" · bios ") + (status == "complete" ? "ok" : "MISSING");
+	}
 	std::snprintf(line, sizeof(line),
-	              "Sphynx %s · %s%s%s · %dx%d · %.1f fps · %.1f ms · up:%llu · pad %s",
+	              "Sphynx %s · %s%s%s · %dx%d · %.1f fps · %.1f ms · up:%llu · pad %s%s",
 	              PPSSPP_GIT_VERSION,
 	              player_ ? (SystemName().empty() ? "?" : SystemName().c_str()) : "starting",
 	              stopped_ ? " · stopped" : "",
@@ -788,7 +820,8 @@ void SphynxPlayerScreen::UpdateStatusLine() {
 	              player_ ? sphynx_player_measured_fps(player_) : 0.0,
 	              player_ ? sphynx_player_frame_ms(player_) : 0.0,
 	              framesDrawn_,
-	              padForcedOn_ ? "on(auto)" : (g_Config.bShowTouchControls ? "on" : "OFF"));
+	              padForcedOn_ ? "on(auto)" : (g_Config.bShowTouchControls ? "on" : "OFF"),
+	              bios_field.c_str());
 	(void)padOpacity;
 	statusView_->SetText(line);
 }

@@ -113,6 +113,11 @@ SPHYNX_PLAYER_EXPORT const char *sphynx_player_status(SphynxPlayerHandle *p);
 SPHYNX_PLAYER_EXPORT const char *sphynx_player_system_name(SphynxPlayerHandle *p);
 // Which BIOS folder this game reads and what is missing from it.
 SPHYNX_PLAYER_EXPORT const char *sphynx_player_bios_status(SphynxPlayerHandle *p);
+// SPHYNX (stage 15): the folder and the files the core can *really* see, with
+// their sizes, e.g. "nds · …/Nintendo DS · found: firmware.bin (256 KiB) ·
+// missing: bios7.bin". Shown when a game starts but never draws a picture -
+// the "I installed the BIOS and it is still white" case.
+SPHYNX_PLAYER_EXPORT const char *sphynx_player_bios_report(SphynxPlayerHandle *p);
 
 // Sound on/off (default on). Applies immediately.
 // ---------------------------------------------------------------------------

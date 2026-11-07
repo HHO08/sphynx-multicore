@@ -19,6 +19,7 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 // ============================================================================
 #include "sphynx_extcore.h"
+#include "sphynx_player_api.h"
 #include "sphynx_ui_api.h"
 #include "../src/android_paths.h"
 
@@ -245,6 +246,80 @@ void TestPlayerSession(const std::string &stub_core, const std::string &sysdir,
 
 }  // namespace
 
+// --- 5. one core at a time, without the "already running" trap --------------
+//
+// SPHYNX (stage 15): the owner photographed "This game could not be started —
+// another game is already running". The host used to keep a flag that refused
+// every later game once one player had been left open, for the whole life of the
+// process. This test drives that exact situation through the real player API:
+// open a game, never close it, open another one. The second open must work, the
+// abandoned handle must report "stopped" instead of crashing, and closing both
+// must be safe.
+void TestReclaim(const std::string &stub_core, const std::string &sys, const std::string &save) {
+	std::printf("\n[5] a game is opened twice: the stale one must not block\n");
+	const std::string libs = g_root + "/nativelib";
+	MkDirs(libs);
+	// The player asks the registry for the core of the system, so the stub has to
+	// sit under the name the APK would ship it as.
+	std::string bytes;
+	{
+		FILE *f = std::fopen(stub_core.c_str(), "rb");
+		if (f) {
+			char buffer[8192];
+			size_t n = 0;
+			while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) bytes.append(buffer, n);
+			std::fclose(f);
+		}
+	}
+	const std::string core_path = libs + "/libsphynx_core_gambatte.so";
+	WriteFile(core_path, bytes);
+	Check(!bytes.empty(), "the stub core was copied into the native library folder");
+	sphynx_ui_set_paths(libs.c_str(), sys.c_str(), save.c_str());
+
+	const std::string game = g_root + "/reclaim.gb";
+	WriteFile(game, std::string(64, '\0'));
+
+	char err[512] = {};
+	SphynxPlayerHandle *first = sphynx_player_open(game.c_str(), "gb", err, sizeof(err));
+	Check(first != nullptr, std::string("the first game opens: ") + err);
+	if (!first) return;
+
+	// Deliberately not closed - this is the situation the owner's screenshot
+	// showed: a player that outlived its screen.
+	char err2[512] = {};
+	SphynxPlayerHandle *second = sphynx_player_open(game.c_str(), "gb", err2, sizeof(err2));
+	Check(second != nullptr, std::string("the second game opens while the first is still open: ") + err2);
+	Check(std::string(err2).find("already running") == std::string::npos,
+	      "the words \"already running\" are gone for good");
+
+	if (second) {
+		Check(sphynx_player_run(second) == 1, "the new game is running");
+		Check(sphynx_player_run(first) == -1, "the abandoned handle reports stopped, it does not crash");
+		Check(sphynx_player_measured_fps(first) == 0.0, "and it reads as zero, not as garbage");
+		Check(std::string(sphynx_player_status(first)).find("closed") != std::string::npos,
+		      "its status explains what happened");
+		// Every call on a reclaimed handle must be a safe no-op.
+		sphynx_player_set_pad(first, 0xFFFF, 0, 0, 0, 0);
+		sphynx_player_set_paused(first, 0);
+		sphynx_player_flush_save(first);
+		Check(sphynx_player_state_exists(first, 0) == 0, "state lookups on it are refused, not executed");
+		Check(sphynx_player_frame_size(first, nullptr, nullptr) == 0, "and it has no frame to give");
+		sphynx_player_close(first);   // frees the memory the reclaim left behind
+		sphynx_player_close(second);
+	} else {
+		sphynx_player_close(first);
+	}
+
+	// And the normal path still works afterwards: close, then open again.
+	char err3[512] = {};
+	SphynxPlayerHandle *third = sphynx_player_open(game.c_str(), "gb", err3, sizeof(err3));
+	Check(third != nullptr, std::string("a game opens normally after all that: ") + err3);
+	if (third) {
+		Check(sphynx_player_run(third) == 1, "and it runs");
+		sphynx_player_close(third);
+	}
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		std::printf("usage: %s /path/to/libstub_core.so\n", argv[0]);
@@ -263,6 +338,7 @@ int main(int argc, char **argv) {
 	TestClassification();
 	TestThumbnail(stub_core, g_root + "/nativelib", g_root + "/sys", g_root + "/save");
 	TestPlayerSession(stub_core, g_root + "/sys", g_root + "/save");
+	TestReclaim(stub_core, g_root + "/sys", g_root + "/save");
 
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");

@@ -97,6 +97,11 @@ protected:
 
 private:
 	void StartGame();
+	// SPHYNX (stage 15): closes the player this screen already owns, if any, so
+	// a second open can never meet the host's "one core at a time" rule. This is
+	// the client half of the fix for "another game is already running": the host
+	// now repairs itself, and this makes sure it never has to.
+	void ClosePlayer();
 	void ChooseSystem(const std::vector<std::string> &keys, const std::vector<std::string> &names);
 	void RunFrames();
 	void UpdatePadState();
