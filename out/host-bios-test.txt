@@ -1,5 +1,5 @@
 Sphynx BIOS/state test (sphynx-extcore-host 1.18.1-stage4 (playback+thumbnails, libretro ABI 1))
-workspace: /tmp/sphynx_bios_RmeqVC
+workspace: /tmp/sphynx_bios_oicCyu
 
 [BIOS registry]
   ok    exactly 16 systems have a BIOS folder
@@ -25,6 +25,7 @@ workspace: /tmp/sphynx_bios_RmeqVC
   ok    each folder explains which files it wants
   ok    the Saturn README names both region BIOS files
   ok    and says the BIOS is required
+  ok    folder names carry no numbering (plain system names only)
   ok    Dreamcast is marked optional
   ok    a second run creates nothing (idempotent)
   ok    a README the user edited is never overwritten
@@ -40,6 +41,8 @@ workspace: /tmp/sphynx_bios_RmeqVC
   ok    the ColecoVision BIOS arrived in its own folder
   ok    the original file is left where it was (copy, not move)
   ok    adoption does not run twice
+  ok    a BIOS sitting in an older numbered folder is adopted
+  ok    and the PlayStation system now has its file
   ok    adopting a BIOS makes the system complete
 
 [UI/Java bridge]
@@ -81,4 +84,4 @@ workspace: /tmp/sphynx_bios_RmeqVC
   ok    a file without an extension is not claimed
   ok    no Context on the host: launch reports 0
 
-66 checks, 0 failure(s) — all good
+69 checks, 0 failure(s) — all good

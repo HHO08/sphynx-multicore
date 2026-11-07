@@ -106,10 +106,14 @@ def patch_mainscreen(repo: Path) -> None:
         "	if (!path.IsLocalType())\n"
         "		return false;\n"
         "	const std::string sphynxPath = path.ToString();\n"
+        "	// Two independent tests, either one is enough. Detection can be defeated (an\n"
+        "	// unreadable URI, a header it does not expect); the extension table cannot,\n"
+        "	// and it contains no PSP format, so PSP games are never affected.\n"
         "	const int external = sphynx_ui_is_external(sphynxPath.c_str());\n"
-        "	if (external != 1) {\n"
-        "		if (external == -1)\n"
-        "			sphynx_ui_log_line((\"route: not classified as a game -> \" + sphynxPath).c_str());\n"
+        "	const int known_ext = sphynx_ui_is_known_extension(sphynxPath.c_str());\n"
+        "	if (external != 1 && known_ext != 1) {\n"
+        "		sphynx_ui_log_line((\"route: left to PPSSPP (external=\" + std::to_string(external) +\n"
+        "		                    \" known_ext=\" + std::to_string(known_ext) + \") -> \" + sphynxPath).c_str());\n"
         "		return false;\n"
         "	}\n"
         "	(void)screenManager;\n"
@@ -221,7 +225,42 @@ def patch_gamescreen(repo: Path) -> None:
         anchor = '#include "UI/EmuScreen.h"'
         if anchor in s:
             s = s.replace(anchor, anchor + '\n#include "UI/MainScreen.h"   // SPHYNX: SphynxRouteExternal()', 1)
+
+    # A non-PSP game must not even show the PSP game sheet: route as soon as the
+    # sheet opens, independently of which button is pressed afterwards.
+    old_update = ("void GameScreen::update() {\n"
+                  "\tUIScreen::update();\n")
+    new_update = ("void GameScreen::update() {\n"
+                  "\tUIScreen::update();\n\n"
+                  "\t// SPHYNX: a non-PSP game must never show the PSP game sheet. The moment\n"
+                  "\t// this screen opens for one, the player takes over.\n"
+                  "\tif (!sphynxChecked_) {\n"
+                  "\t\tsphynxChecked_ = true;\n"
+                  "\t\tif (SphynxRouteExternal(screenManager(), gamePath_)) {\n"
+                  "\t\t\tTriggerFinish(DR_BACK);\n"
+                  "\t\t\treturn;\n"
+                  "\t\t}\n"
+                  "\t}\n")
+    if "sphynxChecked_" in s:
+        print("  == GameScreen: update() already guarded")
+    elif old_update in s:
+        s = s.replace(old_update, new_update, 1)
+        print("  ok GameScreen: update() routes external games immediately")
+    else:
+        print("  !! GameScreen: update() anchor not found")
     _write(f, s)
+
+    h = repo / "UI" / "GameScreen.h"
+    hs = _read(h)
+    if "sphynxChecked_" not in hs:
+        anchor = "\t// Event handlers\n\tUI::EventReturn OnPlay(UI::EventParams &e);"
+        if anchor in hs:
+            hs = hs.replace(anchor, ("\t// SPHYNX: set once this sheet has checked whether the game is a PSP one.\n"
+                                     "\tbool sphynxChecked_ = false;\n\n" + anchor), 1)
+            _write(h, hs)
+            print("  ok GameScreen.h: sphynxChecked_ declared")
+        else:
+            print("  !! GameScreen.h: event-handler anchor not found")
 
 
 def patch_miscscreens(repo: Path) -> None:
@@ -413,10 +452,58 @@ def patch_emuscreen(repo: Path) -> None:
              "\t}\n")
     if anchor in s:
         s = s.replace(anchor, guard, 1)
-        _write(f, s)
         print("  ok EmuScreen.cpp: catch-all routing added")
     else:
         print("  !! EmuScreen.cpp: update() anchor not found")
+
+    # The wall in front of the PSP core: bootGame() is what starts it.
+    old_boot = ("void EmuScreen::bootGame(const Path &filename) {\n"
+                "\tif (Achievements::IsBlockingExecution()) {")
+    new_boot = ("void EmuScreen::bootGame(const Path &filename) {\n"
+                "\t// SPHYNX: a file that cannot be a PSP disc must never reach the PSP core.\n"
+                "\t// This is the exact function that produces \"Failed initializing CPU or\n"
+                "\t// memory\", so nothing below runs until the file is known to be a PSP game.\n"
+                "\tif (!sphynxRouted_) {\n"
+                "\t\tsphynxRouted_ = true;\n"
+                "\t\tif (SphynxRouteBootFailure(filename)) {\n"
+                "\t\t\tbootPending_ = false;\n"
+                "\t\t\tscreenManager()->switchScreen(new MainScreen());\n"
+                "\t\t\treturn;\n"
+                "\t\t}\n"
+                "\t}\n\n"
+                "\tif (Achievements::IsBlockingExecution()) {")
+    if "SphynxRouteBootFailure(filename)" in s:
+        print("  == EmuScreen: bootGame already guarded")
+    elif old_boot in s:
+        s = s.replace(old_boot, new_boot, 1)
+        print("  ok EmuScreen: bootGame guarded before the PSP core starts")
+    else:
+        print("  !! EmuScreen: bootGame anchor not found")
+
+    # A readable failure instead of the bare PSP message for non-PSP files.
+    old_err = '\t\terrLoadingFile.append(err->T(errorMessage_.c_str()));\n'
+    new_err = ('\t\terrLoadingFile.append(err->T(errorMessage_.c_str()));\n'
+               '\t\t// SPHYNX: for a non-PSP file, say what Sphynx decided and append the\n'
+               '\t\t// tail of its log: a message the user can send back beats a retry.\n'
+               '\t\tconst std::string sphynxPathForDiag = gamePath_.ToString();\n'
+               '\t\tif (sphynx_ui_is_known_extension(sphynxPathForDiag.c_str()) == 1) {\n'
+               '\t\t\terrLoadingFile.append("\\n\\n[SPHYNX] This is not a PSP game: the player\\n"\n'
+               '\t\t\t                      "screen should have opened instead of this message.\\n");\n'
+               '\t\t\terrLoadingFile.append(sphynx_ui_diag_report());\n'
+               '\t\t}\n')
+    if "sphynx_ui_diag_report" in s:
+        print("  == EmuScreen: diagnostic message already present")
+    elif old_err in s:
+        s = s.replace(old_err, new_err, 1)
+        print("  ok EmuScreen: failure message now carries the Sphynx report")
+    else:
+        print("  !! EmuScreen: error-message anchor not found")
+
+    if '#include "sphynx_ui_api.h"' not in s:
+        anchor_inc = '#include "UI/EmuScreen.h"'
+        if anchor_inc in s:
+            s = s.replace(anchor_inc, anchor_inc + '\n// SPHYNX: routing + diagnostics bridge.\n#include "sphynx_ui_api.h"', 1)
+    _write(f, s)
 
 
 def patch_gameinfocache(repo: Path) -> None:

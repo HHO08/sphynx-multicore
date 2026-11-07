@@ -1,4 +1,4 @@
-  ok    UI/MainScreen.cpp:162 unguarded on purpose — LaunchFile() returned early for external files
+  ok    UI/MainScreen.cpp:166 unguarded on purpose — LaunchFile() returned early for external files
   ok    UI/Store.cpp:606 unguarded on purpose — the store only serves PSP games
   guarded EmuScreen sites: 5, unguarded: 0
 routing check: every game launch path is guarded

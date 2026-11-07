@@ -83,6 +83,8 @@ using namespace std::placeholders;
 #include "UI/PauseScreen.h"
 #include "UI/MainScreen.h"
 #include "UI/EmuScreen.h"
+// SPHYNX: routing + diagnostics bridge.
+#include "sphynx_ui_api.h"
 #include "UI/DevScreens.h"
 #include "UI/GameInfoCache.h"
 #include "UI/MiscScreens.h"
@@ -232,6 +234,19 @@ bool EmuScreen::bootAllowStorage(const Path &filename) {
 }
 
 void EmuScreen::bootGame(const Path &filename) {
+	// SPHYNX: the last wall. A file that cannot be a PSP disc must never reach
+	// the PSP core, whatever route it took to get here — this is where
+	// "Failed initializing CPU or memory" is produced, so nothing below runs
+	// until we know the file is either a PSP game or already handled.
+	if (!sphynxRouted_) {
+		sphynxRouted_ = true;
+		if (SphynxRouteBootFailure(filename)) {
+			bootPending_ = false;
+			screenManager()->switchScreen(new MainScreen());
+			return;
+		}
+	}
+
 	if (Achievements::IsBlockingExecution()) {
 		// Keep waiting.
 		return;
@@ -1253,6 +1268,14 @@ void EmuScreen::update() {
 		errLoadingFile.append(err->T("Error loading file", "Could not load game"));
 		errLoadingFile.append(" ");
 		errLoadingFile.append(err->T(errorMessage_.c_str()));
+		// SPHYNX: if this is not a PSP file, say what Sphynx decided and append
+		// the tail of its log. A message I can read is worth more than a retry.
+		const std::string sphynxPathForDiag = gamePath_.ToString();
+		if (sphynx_ui_is_known_extension(sphynxPathForDiag.c_str()) == 1) {
+			errLoadingFile.append("\n\n[SPHYNX] This is not a PSP game: the player\n"
+			                      "screen should have opened instead of this message.\n");
+			errLoadingFile.append(sphynx_ui_diag_report());
+		}
 
 		screenManager()->push(new PromptScreen(gamePath_, errLoadingFile, "OK", ""));
 		errorMessage_.clear();

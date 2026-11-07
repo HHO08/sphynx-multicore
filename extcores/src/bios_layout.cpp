@@ -50,39 +50,39 @@ const char *kMasterSystemFiles[] = {"bios.sms", nullptr};
 
 const BiosSystem kSystems[] = {
 	// ---- mandatory: nothing runs without one of these files ----------------
-	{"psx", "01-PlayStation", kPsxFiles, 3, true,
+	{"psx", "PlayStation", kPsxFiles, 3, true,
 	 "One of the three files is enough. PAL games use scph5502, NTSC-U scph5501, NTSC-J scph5500."},
-	{"saturn", "02-Sega Saturn", kSaturnFiles, 2, true,
+	{"saturn", "Sega Saturn", kSaturnFiles, 2, true,
 	 "sega_101.bin = Japanese Saturn, mpr-17933.bin = USA/Europe Saturn. Pick the one matching the disc."},
-	{"segacd", "03-Sega CD", kSegaCdFiles, 3, true,
+	{"segacd", "Sega CD", kSegaCdFiles, 3, true,
 	 "Choose by the disc region: _U = USA, _E = Europe, _J = Japan."},
-	{"pcecd", "04-PC Engine CD", kPceCdFiles, 3, true,
+	{"pcecd", "PC Engine CD", kPceCdFiles, 3, true,
 	 "syscard3.pce is the Super CD-ROM2 card and covers nearly every CD game. Hucard games need nothing."},
-	{"neogeocd", "05-Neo Geo CD", kNeoGeoCdFiles, 1, true,
+	{"neogeocd", "Neo Geo CD", kNeoGeoCdFiles, 1, true,
 	 "The Neo Geo CD BIOS (neocd.bin), taken from the front-loading console."},
-	{"3do", "06-3DO", kThreeDoFiles, 2, true,
+	{"3do", "3DO", kThreeDoFiles, 2, true,
 	 "panafz10.bin is the Panasonic FZ-10 BIOS; panafz1.bin is the older FZ-1 one."},
-	{"pcfx", "07-PC-FX", kPcFxFiles, 2, true,
+	{"pcfx", "PC-FX", kPcFxFiles, 2, true,
 	 "The single PC-FX BIOS file."},
-	{"amiga", "08-Amiga", kAmigaFiles, 4, true,
+	{"amiga", "Amiga", kAmigaFiles, 4, true,
 	 "Kickstart ROMs. kick34005.A500 covers most A500 games; keep the others if a game asks for them."},
-	{"pc88", "09-PC-8801", kPc88Files, 3, true,
+	{"pc88", "PC-8801", kPc88Files, 3, true,
 	 "PC-88 ROM set (main ROM, font ROM, disk ROM). Names accepted by the NP2kai core."},
-	{"pc98", "10-PC-9801", kPc98Files, 3, true,
+	{"pc98", "PC-9801", kPc98Files, 3, true,
 	 "PC-98 ROM set plus the font ROM; the emulator refuses to start without the font."},
-	{"fds", "11-Famicom Disk System", kFdsFiles, 1, true,
+	{"fds", "Famicom Disk System", kFdsFiles, 1, true,
 	 "The Famicom Disk System BIOS (disksys.rom). Cartridge NES games need nothing."},
-	{"coleco", "12-ColecoVision", kColecoFiles, 1, true,
+	{"coleco", "ColecoVision", kColecoFiles, 1, true,
 	 "coleco.rom, the ColecoVision BIOS (8 KiB)."},
 
 	// ---- recommended: runs without, clearly better with --------------------
-	{"dreamcast", "13-Dreamcast", kDreamcastFiles, 2, false,
+	{"dreamcast", "Dreamcast", kDreamcastFiles, 2, false,
 	 "Optional: the built-in replacement BIOS works, but the real one fixes boot and logo problems."},
-	{"nds", "14-Nintendo DS", kNdsFiles, 3, false,
+	{"nds", "Nintendo DS", kNdsFiles, 3, false,
 	 "Optional: without firmware a few games refuse to boot. bios7/bios9/firmware belong together."},
-	{"msx", "15-MSX", kMsxFiles, 4, false,
+	{"msx", "MSX", kMsxFiles, 4, false,
 	 "Optional: the built-in C-BIOS only runs a handful of games; the real ROM set runs almost all."},
-	{"sms", "16-Master System", kMasterSystemFiles, 1, false,
+	{"sms", "Master System", kMasterSystemFiles, 1, false,
 	 "Optional: only needed for the Sega boot screen and for SG-1000 games on a Master System."},
 };
 
@@ -316,10 +316,26 @@ int EnsureBiosTree(const std::string &memstick_dir, std::string *report) {
 }
 
 int AdoptLegacyBios(const std::string &memstick_dir, std::string *report) {
-	const std::vector<std::string> sources = {
+	std::vector<std::string> sources = {
 		JoinPath(memstick_dir, "SYSTEM"),   // PPSSPP's traditional BIOS folder
 		memstick_dir,                       // files dumped straight into PSP/
 	};
+	// Also every existing folder of the tree itself. That is how a user who
+	// already filled a folder with an older layout — for example a numbered one
+	// from a previous build — keeps those files after the layout changed.
+	const std::string root = BiosRoot(memstick_dir);
+	if (DirectoryExists(root)) {
+		DIR *dir = ::opendir(root.c_str());
+		if (dir) {
+			while (struct dirent *entry = ::readdir(dir)) {
+				const std::string name = entry->d_name;
+				if (name == "." || name == "..") continue;
+				const std::string path = JoinPath(root, name);
+				if (DirectoryExists(path)) sources.push_back(path);
+			}
+			::closedir(dir);
+		}
+	}
 	int adopted = 0;
 	std::string detail;
 	for (const BiosSystem &s : kSystems) {
@@ -329,6 +345,7 @@ int AdoptLegacyBios(const std::string &memstick_dir, std::string *report) {
 			const std::string dst = JoinPath(dst_dir, s.files[i]);
 			if (FileExists(dst)) continue;
 			for (const std::string &src_dir : sources) {
+				if (src_dir == dst_dir) continue;   // never copy onto itself
 				const std::string src = JoinPath(src_dir, s.files[i]);
 				if (CopyIfMissing(src, dst)) {
 					++adopted;

@@ -153,12 +153,25 @@ void TestTreeCreation() {
 	Check(all_readme, "each folder explains which files it wants");
 
 	// The README must actually name the files, otherwise it is decoration.
-	const std::string saturn_readme = ReadFile(root + "/02-Sega Saturn/README.txt");
+	const std::string saturn_readme = ReadFile(root + "/Sega Saturn/README.txt");
 	Check(saturn_readme.find("sega_101.bin") != std::string::npos &&
 	          saturn_readme.find("mpr-17933.bin") != std::string::npos,
 	      "the Saturn README names both region BIOS files");
 	Check(saturn_readme.find("REQUIRED") != std::string::npos, "and says the BIOS is required");
-	const std::string dc_readme = ReadFile(root + "/13-Dreamcast/README.txt");
+
+	// The request was explicit: folder names carry no numbering.
+	// "3DO" legitimately starts with a digit, so reject the numbering *pattern*
+	// ("01-PlayStation") rather than any digit at the front.
+	bool no_numbering = true;
+	for (int i = 0; i < sphynx::BiosSystemCount(); ++i) {
+		const char *folder = sphynx::AllBiosSystems()[i].folder;
+		if (folder[0] >= '0' && folder[0] <= '9' && folder[1] >= '0' && folder[1] <= '9')
+			no_numbering = false;
+		if (folder[strlen(folder) > 3 ? 2 : 0] == '-' && folder[0] >= '0' && folder[0] <= '9')
+			no_numbering = false;
+	}
+	Check(no_numbering, "folder names carry no numbering (plain system names only)");
+	const std::string dc_readme = ReadFile(root + "/Dreamcast/README.txt");
 	Check(dc_readme.find("OPTIONAL") != std::string::npos, "Dreamcast is marked optional");
 
 	// Running it again must be a no-op: the app does this at every start.
@@ -166,9 +179,9 @@ void TestTreeCreation() {
 	Check(again == 0, "a second run creates nothing (idempotent)");
 
 	// A user note must survive.
-	WriteFile(root + "/01-PlayStation/README.txt", "my own notes\n");
+	WriteFile(root + "/PlayStation/README.txt", "my own notes\n");
 	sphynx::EnsureBiosTree(memstick, &report);
-	Check(ReadFile(root + "/01-PlayStation/README.txt") == "my own notes\n",
+	Check(ReadFile(root + "/PlayStation/README.txt") == "my own notes\n",
 	      "a README the user edited is never overwritten");
 }
 
@@ -206,6 +219,17 @@ void TestMissingAndAdoption() {
 	Check(Exists(memstick + "/SYSTEM/sega_101.bin"), "the original file is left where it was (copy, not move)");
 	Check(sphynx::AdoptLegacyBios(memstick, &report) == 0, "adoption does not run twice");
 
+	// A file left in an older, numbered folder must be adopted as well, so an
+	// existing setup survives a layout change.
+	const std::string legacy = memstick + "/SYSTEMS_BIOS/01-PlayStation";
+	MkDirs(legacy);
+	WriteFile(legacy + "/scph5502.bin", "OLDBIOS");
+	const int adopted2 = sphynx::AdoptLegacyBios(memstick, &report);
+	Check(adopted2 >= 1, "a BIOS sitting in an older numbered folder is adopted");
+	Check(Exists(sphynx::BiosDirForSystem(memstick, "psx") + "/scph5502.bin") ||
+	          sphynx::BiosStatusForSystem(memstick, "psx") == "complete",
+	      "and the PlayStation system now has its file");
+
 	// An adopted file makes the system report complete.
 	Check(sphynx::BiosStatusForSystem(memstick, "saturn") == "complete",
 	      "adopting a BIOS makes the system complete");
@@ -225,7 +249,7 @@ void TestUiApi() {
 	Check(made >= 0, "sphynx_ui_ensure_bios_tree() succeeds");
 
 	char *psx = sphynx_ui_bios_dir_for_system("psx");
-	Check(psx && std::string(psx) == memstick + "/SYSTEMS_BIOS/01-PlayStation",
+	Check(psx && std::string(psx) == memstick + "/SYSTEMS_BIOS/PlayStation",
 	      "the PlayStation folder is handed to the core as its system directory");
 	sphynx_ui_free(psx);
 

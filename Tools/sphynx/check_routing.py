@@ -105,6 +105,15 @@ def main(root: str) -> int:
         problems.append("UI/EmuScreen.cpp lost the boot-failure flag")
     if "SphynxRouteBootFailure(gamePath_)" not in emu:
         problems.append("UI/EmuScreen.cpp lost the second-chance routing")
+    if "SphynxRouteBootFailure(filename)" not in emu:
+        problems.append("UI/EmuScreen.cpp no longer guards bootGame() before the PSP core")
+    if "sphynx_ui_is_known_extension" not in main_screen:
+        problems.append("UI/MainScreen.cpp does not fall back to the extension table")
+    if "sphynx_ui_diag_report" not in emu:
+        problems.append("UI/EmuScreen.cpp lost the diagnostic failure message")
+    gamescreen = (repo / "UI" / "GameScreen.cpp").read_text(encoding="utf-8", errors="surrogateescape")
+    if "sphynxChecked_" not in gamescreen:
+        problems.append("UI/GameScreen.cpp does not route when the game sheet opens")
     if "bool SphynxRouteBootFailure(const Path &path) {" not in main_screen:
         problems.append("UI/MainScreen.cpp does not define SphynxRouteBootFailure()")
     if "sphynx_ui_launch_player" not in main_screen:

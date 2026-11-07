@@ -109,10 +109,14 @@ bool SphynxRouteExternal(ScreenManager *screenManager, const Path &path) {
 	if (!path.IsLocalType())
 		return false;
 	const std::string sphynxPath = path.ToString();
+	// Two independent tests, either one is enough. Detection can be defeated (an
+	// unreadable URI, a header it does not expect); the extension table cannot,
+	// and it contains no PSP format, so PSP games are never affected.
 	const int external = sphynx_ui_is_external(sphynxPath.c_str());
-	if (external != 1) {
-		if (external == -1)
-			sphynx_ui_log_line(("route: not classified as a game -> " + sphynxPath).c_str());
+	const int known_ext = sphynx_ui_is_known_extension(sphynxPath.c_str());
+	if (external != 1 && known_ext != 1) {
+		sphynx_ui_log_line(("route: left to PPSSPP (external=" + std::to_string(external) +
+		                    " known_ext=" + std::to_string(known_ext) + ") -> " + sphynxPath).c_str());
 		return false;
 	}
 	(void)screenManager;

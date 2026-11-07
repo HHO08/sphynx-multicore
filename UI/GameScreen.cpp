@@ -74,6 +74,17 @@ template <typename I> std::string int2hexstr(I w, size_t hex_len = sizeof(I) << 
 void GameScreen::update() {
 	UIScreen::update();
 
+	// SPHYNX: a non-PSP game must never show the PSP game sheet. The moment this
+	// screen opens for one, the player takes over — so the result no longer
+	// depends on which button the user presses afterwards.
+	if (!sphynxChecked_) {
+		sphynxChecked_ = true;
+		if (SphynxRouteExternal(screenManager(), gamePath_)) {
+			TriggerFinish(DR_BACK);
+			return;
+		}
+	}
+
 	// Has the user requested a CRC32?
 	if (CRC32string == "...") {
 		// Wait until the CRC32 is ready.  It might take time on some devices.

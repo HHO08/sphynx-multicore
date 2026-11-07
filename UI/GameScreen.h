@@ -52,6 +52,9 @@ protected:
 private:
 	UI::Choice *AddOtherChoice(UI::Choice *choice);
 
+	// SPHYNX: set once this sheet has checked whether the game is a PSP one.
+	bool sphynxChecked_ = false;
+
 	// Event handlers
 	UI::EventReturn OnPlay(UI::EventParams &e);
 	UI::EventReturn OnGameSettings(UI::EventParams &e);

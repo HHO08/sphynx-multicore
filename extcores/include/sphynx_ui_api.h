@@ -122,6 +122,11 @@ SPHYNX_UI_EXPORT const char *sphynx_ui_log_path(void);
 // One line into the same log, callable from PPSSPP's UI code.
 SPHYNX_UI_EXPORT void sphynx_ui_log_line(const char *text);
 
+// A short multi-line report for on-screen display when something goes wrong:
+// build id, the last failure, and the tail of the log. It is meant to be
+// screenshotted, so a problem on a device I cannot touch becomes readable.
+SPHYNX_UI_EXPORT const char *sphynx_ui_diag_report(void);
+
 #ifdef __cplusplus
 }
 #endif

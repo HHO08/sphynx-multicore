@@ -358,8 +358,8 @@ int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
 	const int adopted = sphynx::AdoptLegacyBios(g_memstick_dir, &adopted_report);
 	g_last_error = "bios tree ready (" + std::to_string(made) + " new folders, " +
 	               std::to_string(adopted) + " files adopted)";
-	sphynx::Logf("bios tree: %s (%d new folders, %d adopted)", sphynx::BiosRoot(g_memstick_dir).c_str(),
-	             made, adopted);
+	sphynx::Logf("build %s (routing v4) — bios tree: %s (%d new folders, %d adopted)",
+	             sphynx::BuildId(), sphynx::BiosRoot(g_memstick_dir).c_str(), made, adopted);
 	if (!adopted_report.empty()) sphynx::LogLine("adopted from PSP/SYSTEM:" + adopted_report);
 	return made;
 }
@@ -407,6 +407,32 @@ int sphynx_ui_launch_player(const char *) { return 0; }
 void sphynx_ui_set_log_path(const char *path) { sphynx::SetLogPath(path ? path : ""); }
 
 void sphynx_ui_log_line(const char *text) { sphynx::LogLine(text ? text : ""); }
+
+// Last 12 log lines + the last error, for the on-screen failure dialog.
+const char *sphynx_ui_diag_report(void) {
+	static std::string report;
+	std::string log = sphynx::ReadLog();
+	// Keep only the tail: the dialog has to stay readable.
+	int lines = 0;
+	size_t cut = log.size();
+	while (cut > 0) {
+		cut = log.rfind('\n', cut ? cut - 1 : 0);
+		if (cut == std::string::npos) { cut = 0; break; }
+		if (++lines >= 12) break;
+		if (cut == 0) break;
+	}
+	if (cut > 0 && cut < log.size()) log = log.substr(cut + 1);
+
+	report = "Sphynx ";
+	report += sphynx::BuildId();
+	report += "\nlast error: ";
+	report += g_last_error;
+	report += "\nlog: ";
+	report += sphynx::LogPath().empty() ? "(not set)" : sphynx::LogPath();
+	report += "\n----\n";
+	report += log.empty() ? "(log is empty)" : log;
+	return report.c_str();
+}
 
 const char *sphynx_ui_log_path(void) {
 	static std::string path;
