@@ -29,6 +29,7 @@ jobs:
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include \
               -o out/sphynx_host_smoke \
               extcores/src/system_db.cpp extcores/src/core_loader.cpp \
+              extcores/src/core_defaults.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp \
               extcores/tests/host_smoke.cpp -ldl -pthread
 
