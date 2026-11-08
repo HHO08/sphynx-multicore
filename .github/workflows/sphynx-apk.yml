@@ -141,6 +141,7 @@ jobs:
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_defaults_test extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/core_defaults.cpp extcores/src/env_callback.cpp \
+              extcores/src/diag_log.cpp \
               extcores/tests/host_defaults_test.cpp -ldl -pthread
           ./out/host_defaults_test | tee out/host-defaults-test.txt
 

@@ -185,6 +185,8 @@ if(SPHYNX_BUILD_TESTS)
 		src/core_loader.cpp
 		src/core_defaults.cpp
 		src/env_callback.cpp
+		# Stage 19: the environment forwards the core's own log lines.
+		src/diag_log.cpp
 	)
 	target_include_directories(sphynx_host_defaults PRIVATE include src)
 	target_compile_features(sphynx_host_defaults PRIVATE cxx_std_17)
