@@ -31,6 +31,7 @@ jobs:
               extcores/src/system_db.cpp extcores/src/core_loader.cpp \
               extcores/src/core_defaults.cpp \
               extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/diag_log.cpp \
               extcores/tests/host_smoke.cpp -ldl -pthread
 
       - name: Run host test
