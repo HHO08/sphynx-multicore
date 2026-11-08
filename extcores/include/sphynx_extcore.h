@@ -115,6 +115,11 @@ struct SystemInfo {
 	SupportLevel support = SupportLevel::NotBuilt;
 };
 
+// SPHYNX (stage 19): the last error/warning the core itself logged. A refused
+// load is the moment this matters: the core usually says why ("no OpenGL
+// support", "cannot open file"), and until now that sentence was thrown away.
+std::string LastCoreMessage();
+
 // Core-level metadata (shared by every system a core covers).
 struct CoreInfo {
 	const char *lib = nullptr;
@@ -224,6 +229,32 @@ public:
 	virtual void OnFrame(const void *data, unsigned width, unsigned height,
 	                     size_t pitch, PixelFormat format) = 0;
 	virtual void OnGeometry(unsigned base_w, unsigned base_h, float aspect) = 0;
+	// SPHYNX (stage 19): a hardware-rendering core does not hand over pixels.
+	// It draws into the framebuffer the frontend gave it and announces the
+	// frame with RETRO_HW_FRAME_BUFFER_VALID; the player then reads that
+	// framebuffer back and pushes the result through OnFrame() as usual.
+	virtual void OnHardwareFrame(unsigned width, unsigned height) { (void)width; (void)height; }
+};
+
+// ---------------------------------------------------------------------------
+//  Hardware rendering (stage 19)
+//
+//  N64 (mupen64plus_next) and Dreamcast (flycast) are GL cores: they ask for a
+//  context with RETRO_ENVIRONMENT_SET_HW_RENDER inside retro_load_game() and
+//  refuse the game when the frontend cannot provide one. The player implements
+//  this interface with an off-screen GL context of its own (hw_render.h);
+//  PPSSPP's renderer is never involved.
+// ---------------------------------------------------------------------------
+class HardwareRenderHost {
+public:
+	virtual ~HardwareRenderHost() = default;
+	// Returns false when no GL context could be created; the core then gets the
+	// same refusal it got before this stage.
+	virtual bool SetupHardwareRender(int context_type, unsigned version_major,
+	                                 unsigned version_minor, bool depth, bool stencil,
+	                                 bool *bottom_left_origin) = 0;
+	virtual void *HardwareRenderProcAddress(const char *name) = 0;
+	virtual uintptr_t HardwareRenderFramebuffer() = 0;
 };
 
 class AudioSink {
@@ -276,6 +307,15 @@ public:
 	// core; a false here means the UI must not claim the change happened.
 	bool SetOption(const std::string &key, const std::string &value);
 	bool TakeOptionChanged();   // consumes the "core must re-read" flag
+	// SPHYNX (stage 19): where a core that needs a hardware renderer gets its
+	// context from. Set before Start(); when it is null the core is answered
+	// exactly as before.
+	void SetHardwareRenderHost(HardwareRenderHost *host) { hw_host_ = host; }
+	HardwareRenderHost *HardwareRenderHostPtr() const { return hw_host_; }
+	bool HardwareRenderActive() const { return hw_active_; }
+	// Called by the player right before the core is unloaded: lets the core
+	// release its GL objects while the context still exists.
+	void NotifyHardwareContextDestroy();
 	void SetPixelFormat(PixelFormat fmt) { pixel_format_ = fmt; }
 	PixelFormat GetPixelFormat() const { return pixel_format_; }
 	int UnknownCommands() const { return unknown_commands_; }
@@ -312,6 +352,11 @@ private:
 	int unknown_commands_ = 0;
 	bool supports_no_game_ = false;
 	bool need_fullpath_ = false;
+	// Hardware rendering (stage 19).
+	HardwareRenderHost *hw_host_ = nullptr;
+	bool hw_active_ = false;
+	void (*hw_context_reset_)() = nullptr;
+	void (*hw_context_destroy_)() = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -362,6 +407,10 @@ public:
 	bool LoadState(const std::vector<uint8_t> &in);
 
 	void SetFrameSink(FrameSink *sink) { frame_sink_ = sink; }
+	// SPHYNX (stage 19): handed to a core that requests a hardware renderer.
+	void SetHardwareRenderHost(HardwareRenderHost *host) { env_.SetHardwareRenderHost(host); }
+	bool HardwareRenderActive() const { return env_.HardwareRenderActive(); }
+	void NotifyHardwareContextDestroy() { env_.NotifyHardwareContextDestroy(); }
 	void SetAudioSink(AudioSink *sink) { audio_sink_ = sink; }
 	void SetWatchdogMs(int ms) { watchdog_ms_ = ms; }
 

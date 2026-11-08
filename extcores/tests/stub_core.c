@@ -32,6 +32,23 @@ static retro_input_poll_t poll_cb;
 static retro_input_state_t state_cb;
 
 static uint16_t *frame_buf;
+
+/* Test hook (stage 19): SPHYNX_STUB_HW=1 makes this core behave like a real
+ * hardware renderer - it asks the frontend for a GL context with
+ * RETRO_ENVIRONMENT_SET_HW_RENDER, draws into the framebuffer it is given, and
+ * presents the frame with RETRO_HW_FRAME_BUFFER_VALID and no pixels. That is
+ * exactly what mupen64plus_next (N64) and flycast (Dreamcast) do, and it is the
+ * path that used to be refused, so this is what the host test drives. */
+static bool hw_mode;
+static uintptr_t hw_framebuffer;
+static unsigned hw_w = 320, hw_h = 240;
+static void (*hw_glClearColor)(float, float, float, float);
+static void (*hw_glClear)(unsigned);
+static void (*hw_glBindFramebuffer)(unsigned, unsigned);
+static void (*hw_glViewport)(int, int, int, int);
+static void (*hw_glEnable)(unsigned);
+static void (*hw_glDisable)(unsigned);
+static void (*hw_glScissor)(int, int, int, int);
 static uint32_t frame_counter;
 static uint32_t last_buttons;
 static bool game_loaded;
@@ -59,6 +76,7 @@ void retro_init(void) {
 }
 
 void retro_deinit(void) {
+	hw_mode = false;
 	free(frame_buf);
 	frame_buf = NULL;
 	game_loaded = false;
@@ -103,6 +121,29 @@ static void stub_crash_now(void) {
 }
 
 void retro_run(void) {
+	if (hw_mode) {
+		/* Draw one solid frame into the frontend's framebuffer and present it
+		 * without any pixels: the frontend has to read it back itself. */
+		const float r = (float)((frame_counter >> 0) & 0xFF) / 255.0f;
+		hw_glBindFramebuffer(0x8D40 /* GL_FRAMEBUFFER */, (unsigned)hw_framebuffer);
+		hw_glViewport(0, 0, (int)hw_w, (int)hw_h);
+		/* A two-colour picture: the GL bottom half red, the top half blue. That
+		 * is how the orientation of the read-back is checked - a test that only
+		 * clears one colour cannot tell "the right way up" from "upside down". */
+		hw_glClearColor(0.0f, 0.25f, 0.75f, 1.0f);
+		hw_glClear(0x4000 /* GL_COLOR_BUFFER_BIT */);
+		if (hw_glEnable && hw_glScissor && hw_glDisable) {
+			hw_glEnable(0x0C11 /* GL_SCISSOR_TEST */);
+			hw_glScissor(0, 0, (int)hw_w, (int)(hw_h / 2));   /* GL y=0 is the bottom */
+			hw_glClearColor(0.9f, 0.1f, 0.0f, 1.0f);
+			hw_glClear(0x4000 /* GL_COLOR_BUFFER_BIT */);
+			hw_glDisable(0x0C11);
+		}
+		(void)r;
+		++frame_counter;
+		if (video_cb) video_cb((const void *)(intptr_t)-1 /* RETRO_HW_FRAME_BUFFER_VALID */, hw_w, hw_h, 0);
+		return;
+	}
 	{
 		const char *crash = getenv("SPHYNX_STUB_CRASH_AFTER");
 		if (crash && *crash && frame_counter >= (uint32_t)atoi(crash)) stub_crash_now();
@@ -181,10 +222,43 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code) {
 	(void)index; (void)enabled; (void)code;
 }
 
+/* --- hardware renderer mode (stage 19 test hook) ---------------------------
+ * The two callbacks in the request are written by the *frontend*, so this core
+ * leaves them NULL and reads them back after SET_HW_RENDER returns - which is
+ * exactly what mupen64plus_next and flycast do. */
 bool retro_load_game(const struct retro_game_info *game) {
 	{
 		const char *crash = getenv("SPHYNX_STUB_CRASH_ON_LOAD");
 		if (crash && *crash && atoi(crash) != 0) stub_crash_now();
+	}
+	{
+		const char *hw = getenv("SPHYNX_STUB_HW");
+		hw_mode = (hw && *hw && atoi(hw) != 0);
+	}
+	if (hw_mode) {
+		/* Ask for a GLES2 context exactly like the real hardware cores do. */
+		struct retro_hw_render_callback hw;
+		memset(&hw, 0, sizeof(hw));
+		hw.context_type = RETRO_HW_CONTEXT_OPENGLES2;
+		hw.version_major = 2;
+		hw.version_minor = 0;
+		hw.depth = true;
+		hw.stencil = false;
+		hw.bottom_left_origin = true;
+		if (!env_cb || !env_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw)) {
+			/* What the real cores do when the frontend has no renderer. */
+			return false;
+		}
+		/* The frontend filled get_current_framebuffer/get_proc_address in. */
+		hw_framebuffer = hw.get_current_framebuffer();
+		hw_glClearColor = (void (*)(float, float, float, float))(void *)(hw.get_proc_address("glClearColor"));
+		hw_glClear = (void (*)(unsigned))(void *)(hw.get_proc_address("glClear"));
+		hw_glBindFramebuffer = (void (*)(unsigned, unsigned))(void *)(hw.get_proc_address("glBindFramebuffer"));
+		hw_glViewport = (void (*)(int, int, int, int))(void *)(hw.get_proc_address("glViewport"));
+		hw_glEnable = (void (*)(unsigned))(void *)(hw.get_proc_address("glEnable"));
+		hw_glDisable = (void (*)(unsigned))(void *)(hw.get_proc_address("glDisable"));
+		hw_glScissor = (void (*)(int, int, int, int))(void *)(hw.get_proc_address("glScissor"));
+		if (!hw_glClearColor || !hw_glClear || !hw_glBindFramebuffer) return false;
 	}
 	if (env_cb) {
 		enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;

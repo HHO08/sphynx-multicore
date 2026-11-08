@@ -40,6 +40,7 @@
 #include "bios_layout.h"
 #include "core_defaults.h"
 #include "diag_log.h"
+#include "hw_render.h"
 #include "player_audio.h"
 #include "state_file.h"
 
@@ -286,6 +287,43 @@ public:
 		fresh_ = true;
 	}
 
+	// SPHYNX (stage 19): a hardware-rendering core announces a frame without any
+	// pixels - it drew into the framebuffer the frontend gave it. The request is
+	// remembered here and fulfilled by HardwareFrameReady() as soon as the frame
+	// has been read back, so the rest of the player sees an ordinary frame.
+	void OnHardwareFrame(unsigned width, unsigned height) override {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (!width || !height) return;
+		hw_width_ = static_cast<int>(width);
+		hw_height_ = static_cast<int>(height);
+		hw_pending_ = true;
+	}
+
+	// Takes the pending hardware frame request (width/height). False when the
+	// core produced no new frame since the last call.
+	bool TakeHardwareFrame(int *width, int *height) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (!hw_pending_) return false;
+		hw_pending_ = false;
+		*width = hw_width_;
+		*height = hw_height_;
+		return true;
+	}
+
+	// Publishes a frame read back from the core's framebuffer. The buffer is
+	// already RGBA8888 in the layout the texture upload expects, which is what
+	// glReadPixels() produced.
+	void HardwareFrameReady(const uint8_t *rgba, int width, int height) {
+		if (!rgba || width <= 0 || height <= 0) return;
+		std::lock_guard<std::mutex> lock(mutex_);
+		const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+		if (pixels_.size() != bytes) pixels_.resize(bytes);
+		std::memcpy(pixels_.data(), rgba, bytes);
+		width_ = width;
+		height_ = height;
+		fresh_ = true;
+	}
+
 	// SPHYNX (performance, stage 13): the frame used to be copied into a fresh
 	// std::vector on every frame - up to 4 MB of memcpy plus an allocation and a
 	// free at 60 fps. That is a large part of the stutter, and of the audio
@@ -325,6 +363,10 @@ private:
 	int width_ = 0;
 	int height_ = 0;
 	bool fresh_ = false;
+	// Hardware frames (stage 19): the request the core announced, waiting for
+	// the read-back that turns it into an ordinary frame.
+	bool hw_pending_ = false;
+	int hw_width_ = 0, hw_height_ = 0;
 };
 
 class AudioPush : public sphynx::AudioSink {
@@ -341,11 +383,80 @@ private:
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+//  The hardware renderer the player owns (stage 19)
+//
+//  Created by the core's own SET_HW_RENDER request, on the thread that runs the
+//  core, and never touched from anywhere else. It carries the framebuffer id
+//  and the symbol lookup the core needs, plus the orientation the core asked
+//  for so the read-back is the right way up.
+// ---------------------------------------------------------------------------
+class PlayerHardwareRender : public sphynx::HardwareRenderHost {
+public:
+	// The context is created on first use, so a device that never runs a
+	// hardware core (every software system) pays nothing for this.
+	bool SetupHardwareRender(int context_type, unsigned version_major, unsigned version_minor,
+	                         bool depth, bool stencil, bool *bottom_left_origin) override {
+		if (!render_) render_.reset(new sphynx::HwRender());
+		std::string error;
+		if (!render_->Setup(context_type, version_major, version_minor, depth, stencil, &error)) {
+			sphynx::LogLine("player: the hardware renderer could not start: " + error);
+			active_ = false;
+			return false;
+		}
+		active_ = true;
+		// A GL core draws with the bottom-left origin, which is the way up a
+		// read-back comes back; every core that says otherwise is honoured.
+		flip_ = true;
+		if (bottom_left_origin) *bottom_left_origin = flip_;
+		sphynx::LogLine(std::string("player: hardware renderer ready (OpenGL ES ") +
+		                std::to_string(version_major >= 3 ? 3 : 2) + ")");
+		return true;
+	}
+
+	void *HardwareRenderProcAddress(const char *name) override {
+		return render_ ? render_->ProcAddress(name) : nullptr;
+	}
+
+	uintptr_t HardwareRenderFramebuffer() override {
+		return render_ ? static_cast<uintptr_t>(render_->Framebuffer()) : 0;
+	}
+
+	bool Active() const { return active_ && render_ && render_->Active(); }
+	bool Flip() const { return flip_; }
+	sphynx::HwRender *Renderer() { return render_.get(); }
+
+	// Reads the frame the core just drew into the picture the player shows.
+	bool ReadFrame(unsigned width, unsigned height, std::vector<uint8_t> *rgba) {
+		if (!Active()) return false;
+		if (!render_->MakeCurrent()) return false;
+		std::string error;
+		if (!render_->ReadPixels(width, height, flip_, rgba, &error)) {
+			sphynx::LogLine("player: the hardware frame could not be read back: " + error);
+			return false;
+		}
+		return true;
+	}
+
+	void Destroy() {
+		if (render_) render_->Destroy();
+		active_ = false;
+	}
+
+private:
+	std::unique_ptr<sphynx::HwRender> render_;
+	bool active_ = false;
+	bool flip_ = true;
+};
+
 // The handle PPSSPP holds. Declared in the header as an opaque forward
 // declaration, defined here so the layout stays private.
 struct SphynxPlayerHandle {
 	sphynx::Session session;
 	FrameCapture frame;
+	// The hardware renderer, only for the cores that ask for one (stage 19).
+	std::unique_ptr<PlayerHardwareRender> hw;
+	std::vector<uint8_t> hw_frame;      // read-back buffer, reused every frame
 	std::unique_ptr<sphynx::AudioOutput> audio_out;
 	std::unique_ptr<AudioPush> audio_push;
 
@@ -743,6 +854,9 @@ void StopSessionGuarded(SphynxPlayerHandle *p) {
 	g_fault.armed = 1;
 	if (setjmp(g_fault.env) == 0) {
 		FlushBatterySave(p);
+		// SPHYNX (stage 19): a hardware core releases its GL objects here, while
+		// the context still exists, then the context itself goes.
+		if (p->session.HardwareRenderActive()) p->session.NotifyHardwareContextDestroy();
 		p->session.Stop();
 		g_fault.armed = 0;
 	} else {
@@ -751,6 +865,7 @@ void StopSessionGuarded(SphynxPlayerHandle *p) {
 		p->session.AbandonCore();
 	}
 	p->session_mutex.unlock();
+	if (p->hw) p->hw->Destroy();
 }
 
 void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string content,
@@ -775,6 +890,7 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 		// The crashed core is left completely alone: unload_game() and deinit()
 		// are calls back into the code that just faulted.
 		p->session.AbandonCore();
+		if (p->hw) p->hw->Destroy();
 		sphynx::LogLine(std::string("player: ") + p->system_name + " crashed while starting (" +
 		                SignalName(crash_signal) + ")");
 		{
@@ -876,6 +992,7 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 				// The core is gone: drop it untouched and tell the screen the
 				// truth. No process death, no silent ejection.
 				p->session.AbandonCore();
+				if (p->hw) p->hw->Destroy();
 				p->error = std::string("the emulator crashed (") + SignalName(frame_crash) + ")";
 				sphynx::LogLine(std::string("player: ") + p->system_name + ": " + p->error);
 				p->failed = true;
@@ -884,6 +1001,19 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 				break;
 			}
 			if (ok) ++p->frames_run;
+			// SPHYNX (stage 19): a hardware core leaves its picture in the
+			// framebuffer instead of returning pixels, so it is fetched here -
+			// on the core's thread, with the core's context current - and handed
+			// to the same frame queue the software cores fill.
+			{
+				int hw_w = 0, hw_h = 0;
+				if (p->hw && p->frame.TakeHardwareFrame(&hw_w, &hw_h)) {
+					if (p->hw->ReadFrame(static_cast<unsigned>(hw_w), static_cast<unsigned>(hw_h),
+					                     &p->hw_frame)) {
+						p->frame.HardwareFrameReady(p->hw_frame.data(), hw_w, hw_h);
+					}
+				}
+			}
 			// A core that has produced a handful of frames is really running.
 			if (ok && !p->warm.load(std::memory_order_relaxed) && p->frames_run >= 5) {
 				{
@@ -1107,8 +1237,10 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 		sphynx::Logf("player: trying %s with %s (system dir: %s)",
 		             p->system_name.c_str(), p->core_tag.c_str(), system_dir.c_str());
 
-		// 4. Hand the pads outward.
+		// 4. Hand the pads outward, and the renderer to a core that wants one.
 		p->session.SetFrameSink(&p->frame);
+		p->hw.reset(new PlayerHardwareRender());
+		p->session.SetHardwareRenderHost(p->hw.get());
 		p->audio_out = sphynx::CreateAudioOutput();
 		p->audio_push.reset(new AudioPush(p->audio_out.get()));
 		p->session.SetAudioSink(p->audio_push.get());

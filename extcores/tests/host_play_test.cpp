@@ -22,6 +22,7 @@
 #include "sphynx_player_api.h"
 #include "sphynx_ui_api.h"
 #include "../src/android_paths.h"
+#include "../src/hw_render.h"
 
 #include <libretro.h>
 
@@ -500,6 +501,108 @@ void TestCrashIsContained(const std::string &stub_core, const std::string &sys, 
 	unsetenv("SPHYNX_STUB_CRASH_AFTER");
 }
 
+// --- 8. hardware rendering: N64 and Dreamcast (stage 19) ---------------------
+//
+// The owner's screenshot: a .z64 on "Nintendo 64" refused with "core refused
+// this content". The file was fine - mupen64plus_next is a *GL* core, and this
+// frontend answered "no context" to RETRO_ENVIRONMENT_SET_HW_RENDER, so the
+// core refused the game. The same was true of flycast (Dreamcast).
+//
+// This test drives the real thing: the stub core asks for a GLES2 context,
+// draws into the framebuffer it is given and presents a frame with no pixels
+// (RETRO_HW_FRAME_BUFFER_VALID). Everything below runs on the same object code
+// that ships in the APK.
+void TestHardwareRender(const std::string &stub_core, const std::string &sys, const std::string &save) {
+	std::printf("\n[8] hardware rendering: N64 and Dreamcast\n");
+	const std::string libs = g_root + "/nativelib";
+	MkDirs(libs);
+	std::string bytes;
+	{
+		FILE *f = std::fopen(stub_core.c_str(), "rb");
+		if (f) {
+			char buffer[8192];
+			size_t n = 0;
+			while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) bytes.append(buffer, n);
+			std::fclose(f);
+		}
+	}
+	WriteFile(libs + "/libsphynx_core_mupen64plus_next_gles2.so", bytes);
+	WriteFile(libs + "/libsphynx_core_flycast.so", bytes);
+	sphynx_ui_set_paths(libs.c_str(), sys.c_str(), save.c_str());
+
+	// An N64 cartridge and a Dreamcast disc, both of which used to be refused.
+	const std::string n64 = g_root + "/zelda.z64";
+	WriteFile(n64, std::string(65536, 'Z'));
+
+	// A machine without a usable GL (some CI images, some containers) cannot
+	// test the good path. In that case the *degraded* path is tested instead:
+	// the core must refuse, the player must say so, and the app must live. The
+	// test never pretends a machine has a renderer it does not have.
+	sphynx::HwRender probe;
+	std::string probe_error;
+	const bool gl_available = probe.Setup(2, 2, 0, true, false, &probe_error);
+	probe.Destroy();
+	if (!gl_available) {
+		std::printf("  (no usable GL on this machine: %s)\n", probe_error.c_str());
+		std::printf("  checking the degraded path instead\n");
+		setenv("SPHYNX_STUB_HW", "1", 1);
+		char err_no_gl[512] = {};
+		SphynxPlayerHandle *none = sphynx_player_open(n64.c_str(), nullptr, err_no_gl, sizeof(err_no_gl));
+		Check(none == nullptr, "without a renderer the N64 game is refused, not crashed");
+		Check(std::string(err_no_gl).find("core refused") != std::string::npos,
+		      std::string("and the refusal is the readable one: ") + err_no_gl);
+		unsetenv("SPHYNX_STUB_HW");
+		return;
+	}
+
+	setenv("SPHYNX_STUB_HW", "1", 1);
+	char err[512] = {};
+	SphynxPlayerHandle *player = sphynx_player_open(n64.c_str(), nullptr, err, sizeof(err));
+	Check(player != nullptr, std::string("an N64 game starts now: ") + err);
+	if (player) {
+		Check(std::string(sphynx_player_system_name(player)) == "Nintendo 64",
+		      std::string("and it is the N64 core that runs it: ") + sphynx_player_system_name(player));
+
+		// The picture has to arrive: the core drew it, the frontend read it back.
+		std::vector<unsigned char> frame(1024 * 1024 * 4);
+		int w = 0, h = 0, got = 0;
+		for (int i = 0; i < 300 && !got; ++i) {
+			if (sphynx_player_take_frame(player, frame.data(), (int)frame.size(), &w, &h)) got = 1;
+			else usleep(10000);
+		}
+		Check(got == 1, "a frame arrives from the hardware renderer");
+		Check(w == 320 && h == 240, std::string("with the size the core asked for: ") +
+		      std::to_string(w) + "x" + std::to_string(h));
+		if (got) {
+			// The stub draws a two-colour picture: the GL *bottom* half red, the
+			// GL *top* half blue. GL reads rows bottom-up, so a correct
+			// read-back must arrive with the blue half first. This is the check
+			// that a game can never come out upside down.
+			const unsigned char *first = frame.data();
+			const unsigned char *last = frame.data() + (size_t)(h - 1) * (size_t)w * 4;
+			Check(first[2] > 175 && first[0] < 40,
+			      std::string("the top row is the GL top half (blue): ") + std::to_string(first[0]) + ",0," +
+			      std::to_string(first[2]));
+			Check(last[0] > 200 && last[2] < 40,
+			      std::string("and the bottom row is the GL bottom half (red): ") + std::to_string(last[0]) + ",0," +
+			      std::to_string(last[2]));
+			Check(first[3] == 255, "and every pixel is opaque");
+		}
+		sphynx_player_close(player);
+	}
+
+	// The same core, now asked for a system that does not exist: the refusal
+	// path still has to be sane and the app still has to survive a full
+	// hardware session ending.
+	const std::string dch = g_root + "/sonic.gdi";
+	WriteFile(dch, "1 0 4 2352 track01.bin 0\n");
+	WriteFile(g_root + "/track01.bin", std::string(4096, 'T'));
+	SphynxPlayerHandle *dream = sphynx_player_open(dch.c_str(), nullptr, err, sizeof(err));
+	Check(dream != nullptr, std::string("a Dreamcast game starts too: ") + err);
+	if (dream) sphynx_player_close(dream);
+	unsetenv("SPHYNX_STUB_HW");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		std::printf("usage: %s /path/to/libstub_core.so\n", argv[0]);
@@ -521,6 +624,7 @@ int main(int argc, char **argv) {
 	TestReclaim(stub_core, g_root + "/sys", g_root + "/save");
 	TestRefusalFallback(stub_core, g_root + "/sys", g_root + "/save");
 	TestCrashIsContained(stub_core, g_root + "/sys", g_root + "/save");
+	TestHardwareRender(stub_core, g_root + "/sys", g_root + "/save");
 
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");

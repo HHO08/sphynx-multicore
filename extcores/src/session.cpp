@@ -39,6 +39,14 @@ thread_local const Environment *tls_env = nullptr;
 
 void CbVideo(const void *data, unsigned width, unsigned height, size_t pitch) {
 	if (!tls_frame) return;
+	// SPHYNX (stage 19): a hardware-rendering core sends no pixels at all - it
+	// drew into the framebuffer the frontend handed it and signals the frame
+	// with RETRO_HW_FRAME_BUFFER_VALID. The player reads that framebuffer back
+	// right after the frame and delivers the picture through the usual path.
+	if (data == RETRO_HW_FRAME_BUFFER_VALID) {
+		tls_frame->OnHardwareFrame(width, height);
+		return;
+	}
 	if (!data) return;   // core asking us to duplicate the previous frame
 	// The format is whatever the core negotiated through SET_PIXEL_FORMAT.
 	// Assuming RGB565 here made every core that runs in XRGB8888 (Flycast,
@@ -122,6 +130,11 @@ bool Session::Start(const std::string &core_path, const std::string &content_pat
 
 	if (!loader_.sym->load_game(&info)) {
 		error_ = "core refused this content (unsupported format or missing BIOS)";
+		// SPHYNX (stage 19): if the core said why, say it too - that sentence is
+		// the difference between "the file is wrong" and "the renderer is
+		// missing", and the core is the only one that knows.
+		const std::string said = LastCoreMessage();
+		if (!said.empty()) error_ += " — " + said;
 		if (error) *error = error_;
 		loader_.sym->deinit();
 		loader_.Close();

@@ -21,7 +21,7 @@ on:
 
 env:
   SPHYNX_BASE_TAG: v1.18.1
-  SPHYNX_VERSION_NAME: 1.18.1-sphynx.18
+  SPHYNX_VERSION_NAME: 1.18.1-sphynx.19
   SPHYNX_ABI: armeabi-v7a
 
 jobs:
@@ -69,7 +69,8 @@ jobs:
         shell: bash
         run: |
           chmod +x Tools/sphynx/fetch_cores.sh
-          sudo apt-get update -qq && sudo apt-get install -y -qq binutils unzip
+          sudo apt-get update -qq && sudo apt-get install -y -qq binutils unzip \
+              libegl1 libgles2 libgl1-mesa-dri
           Tools/sphynx/fetch_cores.sh "${{ matrix.abi }}" "android/src/normal/jniLibs/${{ matrix.abi }}"
 
       - name: Core inventory
@@ -88,7 +89,8 @@ jobs:
           gcc -shared -fPIC -o out/libbroken_core.so out/b.c
           g++ -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Iextcores/include -Iextcores/src \
               -o out/host_smoke extcores/src/system_db.cpp extcores/src/core_loader.cpp \
-              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp extcores/src/session.cpp extcores/tests/host_smoke.cpp -ldl -pthread
+              extcores/src/core_defaults.cpp extcores/src/env_callback.cpp extcores/src/session.cpp \
+              extcores/src/diag_log.cpp extcores/tests/host_smoke.cpp -ldl -pthread
           ./out/host_smoke ./out/libstub_core.so ./out/libbroken_core.so | tee out/host-test.txt
 
           # Stage 4: the UI bridge (game list filter, archive routing, the
@@ -111,9 +113,14 @@ jobs:
               extcores/src/png_write.cpp extcores/src/ui_api.cpp \
               extcores/src/android_paths.cpp extcores/src/bios_layout.cpp \
               extcores/src/state_file.cpp extcores/src/diag_log.cpp \
-              extcores/src/player_core.cpp extcores/src/player_audio.cpp \
+              extcores/src/player_core.cpp extcores/src/hw_render.cpp \
+              extcores/src/player_audio.cpp \
               extcores/tests/host_play_test.cpp -ldl -pthread
-          ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
+          # Stage 19: the hardware-render path (N64 mupen64plus_next, Dreamcast
+          # flycast) is exercised through a real GLES2 context, so the job needs
+          # a working EGL. Mesa's software renderer is enough and needs no GPU.
+          EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 \
+              ./out/host_play_test ./out/libstub_core.so | tee out/host-play-test.txt
 
           # Stage 6: PSP/SYSTEMS_BIOS (16 folders, READMEs, adoption of an
           # existing PSP/SYSTEM, missing-file reporting) and the save state file

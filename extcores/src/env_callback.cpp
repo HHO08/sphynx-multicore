@@ -19,14 +19,27 @@
 
 #include <libretro.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
 #include "core_defaults.h"
+#include "diag_log.h"
 
 namespace sphynx {
+namespace {
 
-Environment::Environment() = default;
+// SPHYNX (stage 19): bookkeeping for the core's own log lines. A core may log
+// every frame; the log file is 64 KB and rewriting it sixty times a second
+// would cost more than the game, so only the first lines of a session are kept
+// and debug chatter is dropped entirely.
+std::string g_last_core_message;
+int g_core_log_lines = 0;
+constexpr int kMaxCoreLogLines = 400;
+
+}  // namespace
+
+Environment::Environment() { g_core_log_lines = 0; }
 Environment::~Environment() = default;
 
 void Environment::SetDirectories(const std::string &system_dir, const std::string &save_dir) {
@@ -182,9 +195,74 @@ namespace {
 // call the environment from its own thread during load, so guard the pointer
 // itself to keep the read atomic and ordered.
 Environment *g_active_env = nullptr;
+
+// --- hardware rendering (stage 19) -----------------------------------------
+// The two callbacks handed to the core inside retro_hw_render_callback are
+// plain C functions with no user data, so they reach the active instance
+// through the same single slot the environment itself uses.
+uintptr_t HwGetCurrentFramebuffer(void) {
+	Environment *env = g_active_env;
+	HardwareRenderHost *host = env ? env->HardwareRenderHostPtr() : nullptr;
+	return host ? host->HardwareRenderFramebuffer() : 0;
 }
 
+// libretro declares get_proc_address as "void (*)(void)" - a *function* pointer
+// whose value is not specified - while libretro cores call it as
+// "symbol = (void(*)(void))get_proc_address(name)". Both halves of that contract
+// are met here: the pointer we hand back is a function pointer obtained through
+// a memcpy, which keeps the compiler from complaining about the cast and keeps
+// the behaviour identical on every ABI we ship.
+void (*HwGetProcAddress(const char *name))() {
+	Environment *env = g_active_env;
+	HardwareRenderHost *host = env ? env->HardwareRenderHostPtr() : nullptr;
+	void *symbol = host ? host->HardwareRenderProcAddress(name) : nullptr;
+	void (*result)() = nullptr;
+	static_assert(sizeof(result) == sizeof(symbol), "a data pointer and a function pointer must agree");
+	std::memcpy(&result, &symbol, sizeof(result));
+	return result;
+}
+
+// SPHYNX (stage 19): the core's own log lines, so a refusal always has a
+// readable cause in sphynx_log.txt instead of a guess from the outside.
+void CoreLogLine(enum retro_log_level level, const char *fmt, ...) {
+	if (!fmt) return;
+	if (level == RETRO_LOG_DEBUG) return;                 // chatter, not diagnosis
+	if (g_core_log_lines >= kMaxCoreLogLines) return;     // a cap, not a promise
+	++g_core_log_lines;
+	char buffer[512];
+	va_list args;
+	va_start(args, fmt);
+	std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+	va_end(args);
+	std::string line = "core: ";
+	if (level == RETRO_LOG_ERROR) line += "error: ";
+	else if (level == RETRO_LOG_WARN) line += "warn: ";
+	line += buffer;
+	// A trailing newline would split one message into several lines.
+	while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+	LogLine(line);
+	// The message quote keeps the core's own words, without our prefix.
+	if (level == RETRO_LOG_ERROR || level == RETRO_LOG_WARN) g_last_core_message = buffer;
+}
+
+retro_log_printf_t g_core_log = &CoreLogLine;
+}  // namespace
+
+std::string LastCoreMessage() { return g_last_core_message; }
+
 void Environment::BindActiveInstance(Environment *env) { g_active_env = env; }
+
+void Environment::NotifyHardwareContextDestroy() {
+	// SPHYNX (stage 19): the core frees its GL objects here, while our context
+	// is still current. Called from the emulation thread, inside the same fault
+	// guard the frame loop uses.
+	if (hw_context_destroy_) {
+		void (*destroy)() = hw_context_destroy_;
+		hw_context_destroy_ = nullptr;
+		destroy();
+	}
+	hw_active_ = false;
+}
 
 bool Environment::Trampoline(unsigned cmd, void *data) {
 	Environment *env = g_active_env;
@@ -287,8 +365,55 @@ bool Environment::Callback(unsigned cmd, void *data, void *) {
 		// Core messages are routed to PPSSPP-style toasts by the Android layer;
 		// returning true prevents the core from retrying.
 		return true;
-	case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
-		return false;   // cores fall back to their own logging
+	case RETRO_ENVIRONMENT_GET_LOG_INTERFACE: {
+		// SPHYNX (stage 19): route the core's own messages into sphynx_log.txt.
+		// This is what makes "why did the core refuse this file" answerable on a
+		// device instead of inferred from the outside.
+		if (!data) return false;
+		retro_log_callback *cb = static_cast<retro_log_callback *>(data);
+		cb->log = g_core_log;
+		return true;
+	}
+
+	// --- hardware rendering (stage 19) ------------------------------------
+	case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+		if (!data) return false;
+		retro_hw_render_callback *cb = static_cast<retro_hw_render_callback *>(data);
+		if (!hw_host_) {
+			LogLine("core: asked for a hardware renderer, but none is available here");
+			return false;
+		}
+		bool bottom_left_origin = true;
+		if (!hw_host_->SetupHardwareRender(static_cast<int>(cb->context_type),
+		                                   cb->version_major, cb->version_minor,
+		                                   cb->depth, cb->stencil, &bottom_left_origin)) {
+			LogLine("core: the hardware renderer could not be created");
+			return false;   // the core refuses the game, exactly as before stage 19
+		}
+		cb->get_current_framebuffer = &HwGetCurrentFramebuffer;
+		cb->get_proc_address = &HwGetProcAddress;
+		cb->bottom_left_origin = bottom_left_origin;
+		hw_context_reset_ = cb->context_reset;
+		hw_context_destroy_ = cb->context_destroy;
+		hw_active_ = true;
+		// The contract: the core initialises its GL objects only after the
+		// frontend says the context is ready, and that is now.
+		if (cb->context_reset) cb->context_reset();
+		LogLine("core: hardware renderer ready");
+		return true;
+	}
+	case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER: {
+		// Answering this lets a core that supports several APIs (Flycast, and
+		// mupen64plus_next) ask for the one we can provide, instead of asking for
+		// Vulkan and then failing.
+		if (!data || !hw_host_) return false;
+		*static_cast<enum retro_hw_context_type *>(data) = RETRO_HW_CONTEXT_OPENGLES2;
+		return true;
+	}
+	case RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE:
+		// Declining negotiation is the documented way to make the core fall back
+		// to the plain SET_HW_RENDER request above.
+		return false;
 	case RETRO_ENVIRONMENT_GET_VFS_INTERFACE:
 		return false;   // standard stdio is fine on Android
 	case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:

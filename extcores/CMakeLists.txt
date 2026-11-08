@@ -37,6 +37,7 @@ set(SPHYNX_EXTCORE_SOURCES
 	# sphynx_player_api.h). No GL, no window, no Activity: it only runs the
 	# core and hands pixels, sound and save states to the UI.
 	src/player_core.cpp
+	src/hw_render.cpp
 	src/player_audio.cpp
 )
 
@@ -112,6 +113,9 @@ if(SPHYNX_BUILD_TESTS)
 		src/core_defaults.cpp
 		src/env_callback.cpp
 		src/session.cpp
+		# Stage 19: the environment forwards the core's own log lines, so the
+		# flight recorder is part of this target too.
+		src/diag_log.cpp
 	)
 	target_include_directories(sphynx_host_smoke PRIVATE include)
 	target_compile_features(sphynx_host_smoke PRIVATE cxx_std_17)
@@ -139,6 +143,7 @@ if(SPHYNX_BUILD_TESTS)
 		# Stage 15: the play test also drives the real player API, which is where
 		# the "another game is already running" repair lives.
 		src/player_core.cpp
+		src/hw_render.cpp
 		src/player_audio.cpp
 	)
 	target_include_directories(sphynx_host_play PRIVATE include src)
