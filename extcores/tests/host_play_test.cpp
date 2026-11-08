@@ -181,6 +181,44 @@ void TestThumbnail(const std::string &stub_core, const std::string &nativelib,
 		Check(len2 > 60 && std::memcmp(png2, kSig, 8) == 0, "URI thumbnail is a valid PNG");
 		sphynx_ui_free(png2);
 	}
+
+	// SPHYNX (stage 16): the picture is cached on disk, so the second request
+	// must not need an emulator at all. Proven the hard way: the core is taken
+	// away before the second call. With the cache the PNG still arrives; without
+	// it this is exactly the case that used to re-emulate the game's first
+	// seconds on every start of the game list.
+	{
+		const std::string cachedir = savedir + "/sphynx_thumbs";
+		struct stat st;
+		Check(::stat(cachedir.c_str(), &st) == 0 && S_ISDIR(st.st_mode),
+		      "a thumbnail cache folder was created next to the saves");
+
+		const std::string hidden = nativelib + "/libsphynx_core_bsnes.so.hidden";
+		::unlink(hidden.c_str());
+		const bool moved = ::rename(link.c_str(), hidden.c_str()) == 0;
+		Check(moved, "the core was taken away to make the point");
+
+		unsigned char *png3 = nullptr;
+		int len3 = 0;
+		const int ok3 = sphynx_ui_make_thumbnail(rom.c_str(), &png3, &len3);
+		Check(ok3 == 1, std::string("second request served from the cache, no core needed (") +
+		                    sphynx_ui_last_error() + ")");
+		Check(ok3 == 1 && len3 == len, "and it is the same picture as the first time");
+		if (ok3 == 1 && png3) sphynx_ui_free(png3);
+
+		// Put the core back for the rest of the test run.
+		if (moved) ::rename(hidden.c_str(), link.c_str());
+
+		// A different file behind the same name must not reuse the picture: the
+		// cache key carries size and modification time.
+		const std::string other = g_root + "/storage/emulated/0/PSP/GAME/Ys III (USA).sfc";
+		WriteFile(other, std::string(4096, 'x'));
+		unsigned char *png4 = nullptr;
+		int len4 = 0;
+		const int ok4 = sphynx_ui_make_thumbnail(other.c_str(), &png4, &len4);
+		Check(ok4 == 1, std::string("a changed file is rendered again (") + sphynx_ui_last_error() + ")");
+		if (ok4 == 1 && png4) sphynx_ui_free(png4);
+	}
 }
 
 // --- 4. the player session ---------------------------------------------------

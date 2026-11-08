@@ -446,7 +446,7 @@ const char *BuildId() {
 	// SPHYNX (stage 15): the stage number is part of the string on purpose - a
 	// screenshot of the failure panel then names the build exactly, which is how
 	// a screenshot from a device becomes a usable bug report.
-	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage15 (core settings+audio clock+bios names, libretro ABI ") +
+	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage16 (start-up+launch speed, libretro ABI ") +
 	                        std::to_string(RETRO_API_VERSION) + ")";
 	return id.c_str();
 }

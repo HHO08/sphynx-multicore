@@ -297,6 +297,66 @@ void TestBiosFileNames() {
 }
 
 // ---------------------------------------------------------------------------
+//  1c. Start-up cost (stage 16)
+//
+//  The full BIOS pass reads every candidate folder once per expected file. On a
+//  phone that is behind Android's FUSE layer, and it ran on every start and
+//  every launch - the ten second black screen. These checks pin the two fixes:
+//  a prepared tree is skipped, and a launch only touches its own system folder.
+// ---------------------------------------------------------------------------
+void TestStartupCost() {
+	std::printf("\n[start-up cost: the tree is prepared once (stage 16)]\n");
+	const std::string memstick = g_root + "/mstick";
+	MkDirs(memstick);
+	sphynx::EnsureBiosTree(memstick, nullptr);
+	const std::string root = sphynx::BiosRoot(memstick);
+	// The folder set is complete but the stamp is not there yet: not ready.
+	Check(!sphynx::BiosTreeLooksReady(memstick), "a tree without the stamp is not 'ready'");
+
+	sphynx::MarkBiosTreeReady(memstick);
+	Check(sphynx::BiosTreeLooksReady(memstick), "after the full pass the tree is 'ready'");
+
+	// The user deleted a folder: the full pass must run again, exactly as before,
+	// so 'ready' has to become false.
+	const std::string coleco = sphynx::BiosDirForSystem(memstick, "coleco");
+	::unlink((coleco + "/README.txt").c_str());
+	::rmdir(coleco.c_str());
+	Check(!sphynx::BiosTreeLooksReady(memstick), "a deleted folder makes the tree 'not ready' again");
+	sphynx::EnsureBiosTree(memstick, nullptr);
+	Check(IsDir(coleco), "the full pass puts the folder back");
+	sphynx::MarkBiosTreeReady(memstick);
+
+	// A tree that was never created is never reported ready.
+	Check(!sphynx::BiosTreeLooksReady(g_root + "/does-not-exist"), "a missing tree is not 'ready'");
+	Check(!sphynx::BiosTreeLooksReady(""), "an empty path is answered, not crashed on");
+
+	// The per-game pass: works inside one folder only, and does the same job.
+	const std::string nds = sphynx::BiosDirForSystem(memstick, "nds");
+	// Two of the three DS files are already in place; the third is only in
+	// PSP/SYSTEM. Nothing that exists may be touched by the per-game pass.
+	WriteFile(nds + "/bios7.bin", std::string(1024, '7'));
+	WriteFile(nds + "/firmware.bin", std::string(2048, 'F'));
+	MkDirs(memstick + "/SYSTEM");
+	WriteFile(memstick + "/SYSTEM/Bios9.BIN", std::string(4096, '9'));
+	std::string report;
+	const int prepared = sphynx::PrepareBiosForSystem(memstick, "nds", &report);
+	Check(prepared >= 1, "the per-game pass adopts what PSP/SYSTEM holds");
+	Check(Exists(nds + "/bios9.bin"), "and it lands under the exact name the core opens");
+	Check(Exists(nds + "/bios7.bin") && Exists(nds + "/firmware.bin"),
+	      "the files from the earlier test are still there: nothing was deleted");
+
+	// A system with no BIOS folder is a no-op, and an unknown key is answered.
+	Check(sphynx::PrepareBiosForSystem(memstick, "nes", &report) == 0,
+	      "a system that needs no BIOS is a no-op");
+	Check(sphynx::PrepareBiosForSystem(memstick, "not-a-system", &report) == 0,
+	      "an unknown system key is answered, not crashed on");
+
+	// Running it twice must not do anything the second time.
+	Check(sphynx::PrepareBiosForSystem(memstick, "nds", &report) == 0,
+	      "the second launch of the same system has nothing left to do");
+}
+
+// ---------------------------------------------------------------------------
 //  2. The C surface PPSSPP's UI and Java use
 // ---------------------------------------------------------------------------
 void TestUiApi() {
@@ -428,6 +488,7 @@ int main() {
 	TestTreeCreation();
 	TestMissingAndAdoption();
 	TestBiosFileNames();
+	TestStartupCost();
 	TestUiApi();
 	TestSaveStates();
 	TestDiagLog();

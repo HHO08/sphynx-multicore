@@ -14,6 +14,8 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <dirent.h>
@@ -212,28 +214,69 @@ bool NameMatches(const std::string &file, const std::string &expected) {
 	return IsNameSeparator(f[f.size() - e.size() - 1]);
 }
 
-std::vector<std::string> ReadDirNames(const std::string &dir) {
-	std::vector<std::string> names;
+// SPHYNX (stage 16, start-up speed): every lookup used to open and read the
+// source directory again, so one adoption pass cost
+//     (files of all systems) x (source folders)  =  38 x 18
+// = 684 opendir/readdir sequences - and the Java side runs that pass for up to
+// three PSP folders at launch. On a phone those directories live behind a FUSE
+// layer (Android/media), where one readdir of a folder holding a few dozen BIOS
+// files costs milliseconds: that is the ten second black screen at start-up.
+//
+// The cache below reads each directory exactly once per pass. Same answers, a
+// handful of syscalls instead of hundreds - the cost no longer depends on how
+// many BIOS folders and files exist.
+class DirCache {
+public:
+	// Names of `dir`, lower-cased, with their full path. Read once, then reused.
+	const std::vector<std::pair<std::string, std::string>> &Get(const std::string &dir) {
+		auto it = entries_.find(dir);
+		if (it != entries_.end()) return it->second;
+		std::vector<std::pair<std::string, std::string>> list;
+		DIR *d = ::opendir(dir.c_str());
+		if (d) {
+			while (struct dirent *entry = ::readdir(d)) {
+				const std::string name = entry->d_name;
+				if (name == "." || name == "..") continue;
+				list.emplace_back(Lowered(name), JoinPath(dir, name));
+			}
+			::closedir(d);
+		}
+		return entries_.emplace(dir, std::move(list)).first->second;
+	}
+
+	// A rename inside `dir` makes the cached listing stale; dropping it is
+	// cheaper than reasoning about which entries are still valid.
+	void Forget(const std::string &dir) { entries_.erase(dir); }
+
+private:
+	std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> entries_;
+};
+
+// Full path of the file `expected` inside a listing that is already in memory,
+// or "". This is the only lookup left: reading the directory itself now happens
+// once per folder (see DirCache), never once per expected file.
+std::string FindLooseIn(const std::vector<std::pair<std::string, std::string>> &listing,
+                        const char *expected) {
+	if (!expected || !*expected) return std::string();
+	for (const auto &entry : listing) {
+		// NameMatches() is the one definition of "this file is the one the core
+		// means": same name in any case, or the same name behind a system prefix.
+		if (NameMatches(entry.first, expected)) return entry.second;
+	}
+	return std::string();
+}
+
+std::vector<std::pair<std::string, std::string>> ReadListing(const std::string &dir) {
+	std::vector<std::pair<std::string, std::string>> list;
 	DIR *d = ::opendir(dir.c_str());
-	if (!d) return names;
+	if (!d) return list;
 	while (struct dirent *entry = ::readdir(d)) {
 		const std::string name = entry->d_name;
 		if (name == "." || name == "..") continue;
-		names.push_back(name);
+		list.emplace_back(Lowered(name), JoinPath(dir, name));
 	}
 	::closedir(d);
-	return names;
-}
-
-// Full path of the file `expected` inside `dir`, matching loosely, or "".
-std::string FindLoose(const std::string &dir, const char *expected) {
-	if (dir.empty() || !expected || !*expected) return std::string();
-	for (const std::string &name : ReadDirNames(dir)) {
-		if (!NameMatches(name, expected)) continue;
-		const std::string path = JoinPath(dir, name);
-		if (FileExists(path)) return path;   // a directory with that name is not it
-	}
-	return std::string();
+	return list;
 }
 
 long long FileSizeOf(const std::string &path) {
@@ -420,19 +463,27 @@ int AdoptLegacyBios(const std::string &memstick_dir, std::string *report) {
 	}
 	int adopted = 0;
 	std::string detail;
+	// SPHYNX (stage 16): each source folder is read once, then every lookup is a
+	// string search in memory. The filesystem is asked two questions per system
+	// folder (does it exist, does this file already exist) instead of one per
+	// file per source, which is what the old code did: 38 files x 18 folders.
+	DirCache cache;
+	std::vector<const std::vector<std::pair<std::string, std::string>> *> listings;
+	for (const std::string &src_dir : sources) listings.push_back(&cache.Get(src_dir));
 	for (const BiosSystem &s : kSystems) {
 		const std::string dst_dir = BiosDirForSystem(memstick_dir, s.system_key);
 		if (dst_dir.empty() || !DirectoryExists(dst_dir)) continue;
 		for (int i = 0; i < s.file_count; ++i) {
 			const std::string dst = JoinPath(dst_dir, s.files[i]);
 			if (FileExists(dst)) continue;
-			for (const std::string &src_dir : sources) {
-				if (src_dir == dst_dir) continue;   // never copy onto itself
+			for (size_t si = 0; si < sources.size(); ++si) {
+				if (sources[si] == dst_dir) continue;   // never copy onto itself
 				// SPHYNX (stage 15): the source may be "BIOS7.BIN" or
 				// "nds_bios7.bin"; it is adopted under the exact name the core
 				// opens, so a file that was already on the card starts working
 				// instead of being reported as missing.
-				const std::string src = FindLoose(src_dir, s.files[i]);
+				const std::string src = FindLooseIn(*listings[si], s.files[i]);
+				if (src.empty()) continue;
 				if (CopyIfMissing(src, dst)) {
 					++adopted;
 					detail += "  ";
@@ -460,11 +511,13 @@ std::string MissingBiosFilesInDir(const std::string &dir, const char *system_key
 	if (!s || dir.empty()) return std::string();
 	std::string missing;
 	bool any_present = false;
+	// SPHYNX (stage 16): one listing for the whole answer.
+	const auto listing = ReadListing(dir);
 	for (int i = 0; i < s->file_count; ++i) {
 		// SPHYNX (stage 15): "present" means the file the user put there, even
 		// when the capital letters differ - NormalizeBiosNames() then gives it
 		// the exact name the core opens, so the two answers agree.
-		if (!FindLoose(dir, s->files[i]).empty()) {
+		if (!FindLooseIn(listing, s->files[i]).empty()) {
 			any_present = true;
 			continue;
 		}
@@ -483,9 +536,100 @@ std::string MissingBiosFilesInDir(const std::string &dir, const char *system_key
 	return missing;
 }
 
+// ---------------------------------------------------------------------------
+//  Start-up cost (stage 16) - see bios_layout.h
+// ---------------------------------------------------------------------------
+
+namespace {
+// The stamp lives inside the tree, so moving or deleting the tree invalidates
+// it by definition. The content carries the layout version: if a future build
+// changes the folder set, an old stamp is ignored instead of trusted.
+constexpr const char *kStampName = ".sphynx-tree-v1";
+}  // namespace
+
+bool BiosTreeLooksReady(const std::string &memstick_dir) {
+	if (memstick_dir.empty()) return false;
+	const std::string root = BiosRoot(memstick_dir);
+	if (root.empty() || !DirectoryExists(root)) return false;
+	if (!FileExists(JoinPath(root, kStampName))) return false;
+	// One stat per folder: if the user removed one, the full pass is needed to
+	// put it back - that is the behaviour that existed before, kept.
+	for (const BiosSystem &s : kSystems) {
+		if (!DirectoryExists(JoinPath(root, s.folder))) return false;
+	}
+	return true;
+}
+
+void MarkBiosTreeReady(const std::string &memstick_dir) {
+	const std::string root = BiosRoot(memstick_dir);
+	if (root.empty() || !DirectoryExists(root)) return;
+	WriteIfMissing(JoinPath(root, kStampName), "Sphynx BIOS tree, layout 1\n");
+}
+
+int PrepareBiosForSystem(const std::string &memstick_dir, const char *system_key,
+                         std::string *report) {
+	const BiosSystem *s = FindBiosSystem(system_key);
+	if (!s) return 0;   // this system needs no BIOS: nothing to prepare
+	const std::string dir = BiosDirForSystem(memstick_dir, system_key);
+	if (dir.empty()) return 0;
+	// The folder may have been deleted, or the app reinstalled while the memory
+	// card stayed in place.
+	if (!DirectoryExists(dir) && !MkdirP(dir)) return 0;
+
+	// Two possible sources, read once each: PPSSPP's own SYSTEM folder and the
+	// root of the memory stick (where people drop files).
+	std::vector<std::string> sources = {JoinPath(memstick_dir, "SYSTEM"), memstick_dir};
+	DirCache cache;
+	int fixed = 0;
+	std::string detail;
+	for (const std::string &src_dir : sources) {
+		if (src_dir == dir) continue;
+		const auto &listing = cache.Get(src_dir);
+		for (int i = 0; i < s->file_count; ++i) {
+			const std::string dst = JoinPath(dir, s->files[i]);
+			if (FileExists(dst)) continue;
+			const std::string src = FindLooseIn(listing, s->files[i]);
+			if (src.empty()) continue;
+			if (!CopyIfMissing(src, dst)) continue;
+			++fixed;
+			detail += "  ";
+			detail += BaseName(src);
+			detail += " -> ";
+			detail += s->folder;
+			detail += "/";
+			detail += s->files[i];
+			detail += "\n";
+		}
+	}
+
+	// Then the exact names, inside this folder only.
+	const auto listing = ReadListing(dir);
+	for (int i = 0; i < s->file_count; ++i) {
+		const std::string want = s->files[i];
+		const std::string dst = JoinPath(dir, want);
+		if (FileExists(dst)) continue;
+		const std::string src = FindLooseIn(listing, s->files[i]);
+		if (src.empty() || src == dst) continue;
+		bool ok = ::rename(src.c_str(), dst.c_str()) == 0;
+		if (!ok) ok = CopyIfMissing(src, dst);
+		if (!ok) continue;
+		++fixed;
+		detail += "  ";
+		detail += BaseName(src);
+		detail += " -> ";
+		detail += want;
+		detail += "\n";
+	}
+	if (report) *report = detail;
+	return fixed;
+}
+
 int NormalizeBiosNames(const std::string &memstick_dir, std::string *report) {
 	int fixed = 0;
 	std::string detail;
+	// SPHYNX (stage 16): one directory read per system folder instead of one
+	// per expected file (16 instead of 38 on every start and every launch).
+	DirCache cache;
 	for (const BiosSystem &s : kSystems) {
 		const std::string dir = BiosDirForSystem(memstick_dir, s.system_key);
 		if (dir.empty() || !DirectoryExists(dir)) continue;
@@ -493,7 +637,7 @@ int NormalizeBiosNames(const std::string &memstick_dir, std::string *report) {
 			const std::string want = s.files[i];
 			const std::string dst = JoinPath(dir, want);
 			if (FileExists(dst)) continue;            // already exactly right
-			const std::string src = FindLoose(dir, s.files[i]);
+			const std::string src = FindLooseIn(cache.Get(dir), s.files[i]);
 			if (src.empty() || src == dst) continue;  // nothing to correct
 			// Rename keeps the user's single copy; if the filesystem refuses
 			// (a read-only card, an odd provider) a copy of the same bytes is
@@ -501,6 +645,7 @@ int NormalizeBiosNames(const std::string &memstick_dir, std::string *report) {
 			bool ok = ::rename(src.c_str(), dst.c_str()) == 0;
 			if (!ok) ok = CopyIfMissing(src, dst);
 			if (!ok) continue;
+			cache.Forget(dir);   // the folder changed under the cached listing
 			++fixed;
 			detail += "  ";
 			detail += BaseName(src);
@@ -522,8 +667,10 @@ std::string BiosReport(const std::string &memstick_dir, const char *system_key) 
 	out += dir.empty() ? "(no folder)" : dir;
 	out += " · ";
 	std::string found, missing;
+	// SPHYNX (stage 16): one listing for the whole report.
+	const auto listing = ReadListing(dir);
 	for (int i = 0; i < s->file_count; ++i) {
-		const std::string path = FindLoose(dir, s->files[i]);
+		const std::string path = FindLooseIn(listing, s->files[i]);
 		if (path.empty()) {
 			if (!missing.empty()) missing += ", ";
 			missing += s->files[i];

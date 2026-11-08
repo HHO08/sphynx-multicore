@@ -22,6 +22,9 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
+
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <string>
 #include <vector>
 
@@ -149,6 +152,64 @@ bool IsArchiveExt(const std::string &path) {
 	return ext == "zip" || ext == "7z" || ext == "rar";
 }
 
+// ---------------------------------------------------------------------------
+//  Thumbnail cache (stage 16, start-up / list speed)
+//
+//  Rendering a thumbnail means loading the game's core and emulating up to 240
+//  frames (with a 6 s cap) - on purpose, because the owner requires a real
+//  image for every non-PSP game. What was missing is that the result was thrown
+//  away: PPSSPP asks for the icon again on every list build, so every app start
+//  re-emulated the first seconds of every game in the library, on the game-list
+//  worker threads. That is the "the app is slow now" feeling, and it gets worse
+//  with every game added.
+//
+//  The PNG is now cached in the app's own save folder, keyed by the resolved
+//  game path plus its size and modification time, so a second start reads a
+//  4 KB file instead of running an emulator. Nothing about which games appear
+//  or what their pictures look like changes.
+std::string ThumbCacheDir() {
+	return g_save_dir.empty() ? std::string() : g_save_dir + "/sphynx_thumbs";
+}
+
+std::string ThumbCacheKey(const std::string &local, const std::string &core_key) {
+	// FNV-1a over the identity of the game: path, size, mtime. A different file
+	// behind the same name gets a different key, so the picture cannot go stale.
+	uint64_t hash = 1469598103934665603ull;
+	auto feed = [&hash](const char *data, size_t len) {
+		for (size_t i = 0; i < len; ++i) {
+			hash ^= static_cast<unsigned char>(data[i]);
+			hash *= 1099511628211ull;
+		}
+	};
+	feed(local.data(), local.size());
+	feed(core_key.data(), core_key.size());
+	struct stat st;
+	if (::stat(local.c_str(), &st) == 0) {
+		const uint64_t stamp = static_cast<uint64_t>(st.st_size) ^ (static_cast<uint64_t>(st.st_mtime) << 20);
+		feed(reinterpret_cast<const char *>(&stamp), sizeof(stamp));
+	}
+	char name[40];
+	std::snprintf(name, sizeof(name), "%016llx.png", static_cast<unsigned long long>(hash));
+	return name;
+}
+
+bool ReadWholeFile(const std::string &path, std::vector<uint8_t> *out) {
+	FILE *f = std::fopen(path.c_str(), "rb");
+	if (!f) return false;
+	uint8_t buffer[8192];
+	size_t n = 0;
+	while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) out->insert(out->end(), buffer, buffer + n);
+	std::fclose(f);
+	return !out->empty();
+}
+
+void WriteWholeFile(const std::string &path, const std::vector<uint8_t> &bytes) {
+	FILE *f = std::fopen(path.c_str(), "wb");
+	if (!f) return;
+	std::fwrite(bytes.data(), 1, bytes.size(), f);
+	std::fclose(f);
+}
+
 const char *SystemKeyFor(const std::string &path) {
 	const sphynx::DetectResult r = sphynx::Detect(path, nullptr, 0);
 	if (r.is_psp_native || r.candidates.empty()) return nullptr;
@@ -204,11 +265,6 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	*out = nullptr;
 	*len = 0;
 
-	// One core at a time: libretro's environment callback has a single active
-	// instance per process, so two thumbnail jobs must never overlap.
-	static std::mutex job_mutex;
-	std::lock_guard<std::mutex> job_lock(job_mutex);
-
 	const std::string local = sphynx::LocalPathFor(path);
 	if (local.empty()) {
 		g_last_error = "file is not readable (cannot resolve the Android URI)";
@@ -220,6 +276,34 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 		g_last_error = "no external system for this file";
 		return 0;
 	}
+
+	// SPHYNX (stage 16): a cached picture costs one small read instead of
+	// loading a core and emulating the game's first seconds. Checked before the
+	// job lock, so a cache hit never waits behind a running job.
+	const std::string cache_dir = ThumbCacheDir();
+	std::string cache_path;
+	if (!cache_dir.empty()) {
+		const std::string name = ThumbCacheKey(local, key);
+		cache_path = cache_dir + "/" + name;
+		std::vector<uint8_t> cached;
+		if (ReadWholeFile(cache_path, &cached)) {
+			*len = static_cast<int>(cached.size());
+			*out = static_cast<unsigned char *>(std::malloc(cached.size()));
+			if (!*out) {
+				*len = 0;
+				g_last_error = "out of memory holding a cached thumbnail";
+				return 0;
+			}
+			std::memcpy(*out, cached.data(), cached.size());
+			g_last_error = "ok (cached)";
+			return 1;
+		}
+	}
+
+	// One core at a time: libretro's environment callback has a single active
+	// instance per process, so two thumbnail jobs must never overlap.
+	static std::mutex job_mutex;
+	std::lock_guard<std::mutex> job_lock(job_mutex);
 	const sphynx::SystemInfo *info = sphynx::FindSystemByKey(key);
 	const std::string core = sphynx::CoreLibraryPath(g_native_lib_dir, info->core_lib);
 	if (core.empty()) {
@@ -288,6 +372,15 @@ int sphynx_ui_make_thumbnail(const char *path, unsigned char **out, int *len) {
 	if (!*out) return 0;
 	std::memcpy(*out, png.data(), png.size());
 	*len = int(png.size());
+
+	// SPHYNX (stage 16): remember it, so this game is never emulated just to
+	// find its picture again. A failed write costs nothing - the thumbnail is
+	// still returned.
+	if (!cache_path.empty()) {
+		const std::string dir = ThumbCacheDir();
+		if (!dir.empty() && !sphynx::DirectoryExists(dir)) ::mkdir(dir.c_str(), 0777);
+		WriteWholeFile(cache_path, png);
+	}
 	g_last_error = "ok (frame " + std::to_string(best_frames) + ")";
 	return 1;
 }
@@ -353,6 +446,21 @@ int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
 	}
 	// The flight recorder lives next to the folders the user can find.
 	sphynx::SetLogPath(g_memstick_dir + "/sphynx_log.txt");
+
+	// SPHYNX (stage 16, start-up speed): this runs before the first screen is
+	// drawn, and it used to do the whole create+adopt+rename pass every time -
+	// reading every candidate folder once per expected BIOS file. On a phone
+	// those reads go through Android's FUSE layer, which is what turned start-up
+	// into a ten second black screen. When the tree is already complete,
+	// nothing is left to do, so the pass is skipped with a few stats. It still
+	// runs in full on the first start after an install or an update, and
+	// whenever the user deleted a folder.
+	const auto started = std::chrono::steady_clock::now();
+	if (sphynx::BiosTreeLooksReady(g_memstick_dir)) {
+		g_last_error = "bios tree already prepared";
+		sphynx::Logf("bios tree: already prepared, nothing to do (%.1f ms)", 0.0);
+		return 0;
+	}
 	std::string report;
 	const int made = sphynx::EnsureBiosTree(g_memstick_dir, &report);
 	if (made < 0) {
@@ -363,10 +471,14 @@ int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
 	// per-system folder, so an existing PPSSPP setup needs no manual work.
 	std::string adopted_report;
 	const int adopted = sphynx::AdoptLegacyBios(g_memstick_dir, &adopted_report);
+	// The tree is complete now: say so, so the next start is instant.
+	sphynx::MarkBiosTreeReady(g_memstick_dir);
 	g_last_error = "bios tree ready (" + std::to_string(made) + " new folders, " +
 	               std::to_string(adopted) + " files adopted)";
-	sphynx::Logf("build %s (routing v4) — bios tree: %s (%d new folders, %d adopted)",
-	             sphynx::BuildId(), sphynx::BiosRoot(g_memstick_dir).c_str(), made, adopted);
+	const double elapsed =
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+	sphynx::Logf("build %s (routing v4) — bios tree: %s (%d new folders, %d adopted, %.1f ms)",
+	             sphynx::BuildId(), sphynx::BiosRoot(g_memstick_dir).c_str(), made, adopted, elapsed);
 	if (!adopted_report.empty()) sphynx::LogLine("adopted from PSP/SYSTEM:" + adopted_report);
 	return made;
 }
@@ -383,8 +495,10 @@ char *sphynx_ui_bios_dir_for_system(const char *system_key) {
 	if (dir.empty()) return nullptr;   // this system needs no BIOS
 	// Create it on demand: the user may have deleted the folder, or the app may
 	// have been reinstalled while the memory card stayed in place.
-	std::string report;
-	sphynx::EnsureBiosTree(g_memstick_dir, &report);
+	// SPHYNX (stage 16): this used to rebuild the whole tree (16 folders, 17
+	// README checks and a full adoption pass) on every call, and it is called on
+	// every launch. Only this folder matters here.
+	if (!sphynx::DirectoryExists(dir)) sphynx::EnsureBiosTree(g_memstick_dir, nullptr);
 	if (!sphynx::DirectoryExists(dir)) return nullptr;
 	char *out = static_cast<char *>(std::malloc(dir.size() + 1));
 	if (!out) return nullptr;
@@ -400,20 +514,24 @@ void sphynx_ui_prepare_bios(const char *system_key) {
 		sphynx::LogLine("bios: no memstick folder is known, cannot prepare the system folder");
 		return;
 	}
+	// SPHYNX (stage 16, launch speed): only the folder of the system that is
+	// about to run. The whole-tree pass that used to run here was the reason a
+	// game took seconds to appear: it read every source folder once per expected
+	// file, for all 16 systems, on every launch. The result for this system is
+	// identical - its folder is created if missing, its files are adopted from
+	// PSP/SYSTEM and PSP/, and they get the exact names the core opens.
+	const auto started = std::chrono::steady_clock::now();
 	std::string report;
-	sphynx::EnsureBiosTree(g_memstick_dir, &report);
-	std::string adopted_report;
-	sphynx::AdoptLegacyBios(g_memstick_dir, &adopted_report);
-	if (!adopted_report.empty()) sphynx::LogLine("bios: adopted" + adopted_report);
-
-	// The load-bearing step: exact names.
-	std::string fixed_report;
-	const int fixed = sphynx::NormalizeBiosNames(g_memstick_dir, &fixed_report);
+	const int fixed = sphynx::PrepareBiosForSystem(g_memstick_dir, system_key, &report);
+	const double elapsed =
+		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 	if (fixed > 0) {
-		sphynx::Logf("bios: %d file name(s) corrected so the core can open them", fixed);
-		sphynx::LogLine(fixed_report);
+		sphynx::Logf("bios: %d file(s) prepared so the core can open them (%.1f ms)", fixed, elapsed);
+		sphynx::LogLine(report);
+	} else if (elapsed > 5.0) {
+		// Only worth a line when the storage was noticeably slow.
+		sphynx::Logf("bios: system folder checked in %.1f ms", elapsed);
 	}
-	(void)system_key;   // the whole tree is normalised, not just one folder
 }
 
 char *sphynx_ui_bios_report(const char *system_key) {

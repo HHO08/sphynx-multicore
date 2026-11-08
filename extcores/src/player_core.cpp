@@ -474,23 +474,31 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 	if (rate <= 20.0 || rate > 200.0) rate = 60.0;
 	const double frame_time = 1.0 / rate;
 
-	bool device_on = false;
-	if (!p->audio_out->Start(p->session.SampleRate())) {
-		// Silent playback is a fine outcome; refusing to play is not.
-		sphynx::LogLine("player: audio device could not be opened, continuing silently");
-	} else {
-		device_on = true;
-	}
-
 	// The core's battery RAM is read here, on the core thread, immediately after
 	// the game is loaded and before the user can save anything.
 	LoadBatterySave(p);
 
+	// SPHYNX (stage 16, launch speed): the game is reported as started *before*
+	// the sound device is opened. Opening OpenSL means the Android audio HAL
+	// comes up, and on some devices that takes a noticeable slice of a second -
+	// it used to be spent before the first picture could appear, which is what
+	// made "tap a game" feel slow. The audio device has nothing to do with the
+	// first frame, so the screen is released first and the device follows.
 	{
 		std::lock_guard<std::mutex> lock(p->start_mutex);
 		p->started = true;
 	}
 	p->start_cv.notify_all();
+
+	bool device_on = false;
+	if (!p->sound.load(std::memory_order_relaxed)) {
+		// Sound is off: do not open the device at all (and do not pay for it).
+	} else if (!p->audio_out->Start(p->session.SampleRate())) {
+		// Silent playback is a fine outcome; refusing to play is not.
+		sphynx::LogLine("player: audio device could not be opened, continuing silently");
+	} else {
+		device_on = true;
+	}
 
 	using Clock = std::chrono::steady_clock;
 	auto next_frame = Clock::now();

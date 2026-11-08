@@ -98,6 +98,38 @@ int NormalizeBiosNames(const std::string &memstick_dir, std::string *report);
 // there and the core still refuses it".
 std::string BiosReport(const std::string &memstick_dir, const char *system_key);
 
+// ---------------------------------------------------------------------------
+//  Start-up cost (stage 16)
+//
+//  The full pass above (create + adopt + rename) is what the app ran on every
+//  start *and* on every game launch, and it is the reason the app began with a
+//  black screen for seconds: it reads every candidate source folder once per
+//  expected file, and those folders live behind Android's FUSE layer. Two
+//  additions make it cost nothing when there is nothing to do:
+//
+//    * BiosTreeLooksReady() - a stamp file plus one stat per folder: when the
+//      tree is already complete, the whole pass is skipped;
+//    * PrepareBiosForSystem() - the cheap per-system version used when a game
+//      is opened: only that system's folder is touched.
+//
+//  Neither changes what ends up in the tree: the full pass still runs the first
+//  time (install, update, or a folder the user deleted), and the per-system
+//  pass still adopts and renames inside the folder the game is about to use.
+// ---------------------------------------------------------------------------
+
+// True when the tree exists, every system folder is there, and the stamp file
+// written by MarkBiosTreeReady() is present. A few stats, no directory reads.
+bool BiosTreeLooksReady(const std::string &memstick_dir);
+
+// Records that the full pass completed for this tree (one small file).
+void MarkBiosTreeReady(const std::string &memstick_dir);
+
+// The cheap per-game pass: ensures this system's folder exists, adopts its
+// files from PSP/SYSTEM and from PSP/ itself, and gives them the exact names
+// the core opens. Touches nothing else. Returns how many names were corrected.
+int PrepareBiosForSystem(const std::string &memstick_dir, const char *system_key,
+                         std::string *report);
+
 // Comma separated list of the expected files that are missing ("" = complete).
 // An empty BIOS folder therefore reports every file of that system.
 std::string MissingBiosFiles(const std::string &memstick_dir, const char *system_key);
