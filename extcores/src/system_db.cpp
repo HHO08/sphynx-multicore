@@ -41,25 +41,30 @@ const char *kExtGenesis[] = {"md", "gen", "smd"};
 const char *kExt32X[] = {"32x"};
 // Sega CD / Saturn / PCE-CD / 3DO / PSX / Dreamcast / Neo Geo CD all share
 // .cue/.chd/.iso; the magic sniffer and the user's answer decide between them.
-const char *kExtDiscCue[] = {"cue", "chd", "iso"};
+// SPHYNX (stage 17): a raw disc image is just as often .bin/.img as it is .cue
+// or .iso, and those two extensions used to be claimed by the Sega Pico core
+// alone - so a PlayStation or Saturn .bin was handed to a core that cannot read
+// it and the answer was "core refused this content". They are now offered to
+// every disc system, and the player tries them in order until one really starts.
+const char *kExtDiscImage[] = {"cue", "chd", "iso", "bin", "img"};
 const char *kExtDreamcast[] = {"gdi", "cdi", "chd"};
 const char *kExtPico[] = {"bin", "md"};
-const char *kExt3do[] = {"iso", "cue", "chd"};
+const char *kExt3do[] = {"iso", "cue", "chd", "bin", "img"};
 const char *kExtAmiga[] = {"adf", "adz", "dms", "ipf", "hdf", "lha", "uae"};
 const char *kExtArcade[] = {"zip", "7z"};
 const char *kExtMsx[] = {"rom", "mx1", "mx2", "ri", "col", "dsk", "cas", "sg"};
 const char *kExtColeco[] = {"col"};   // blueMSX also emulates ColecoVision
 const char *kExtWs[] = {"ws"};
 const char *kExtWsc[] = {"wsc"};
-const char *kExtPsx[] = {"cue", "chd", "iso", "exe", "psexe"};
+const char *kExtPsx[] = {"cue", "chd", "iso", "bin", "img", "exe", "psexe"};
 const char *kExtPc88[] = {"d88", "d98", "88", "98", "fdi", "hdf", "t88"};
 const char *kExtPc98[] = {"hdi", "hdd", "fdd", "d88", "d98", "fdi"};
-const char *kExtPcfx[] = {"cue", "chd"};
+const char *kExtPcfx[] = {"cue", "chd", "bin", "img"};
 const char *kExtPce[] = {"pce"};
-const char *kExtPceCd[] = {"cue", "chd"};
+const char *kExtPceCd[] = {"cue", "chd", "bin", "img"};
 const char *kExtDos[] = {"zip", "dosz", "conf", "exe", "com", "bat"};
 const char *kExtScumm[] = {"scummvm"};
-const char *kExtNeoGeoCd[] = {"cue", "chd"};
+const char *kExtNeoGeoCd[] = {"cue", "chd", "bin", "img"};
 const char *kExtNgp[] = {"ngp"};
 const char *kExtNgpc[] = {"ngc"};
 
@@ -82,8 +87,8 @@ const SystemInfo kSystems[] = {
 	{SystemId::GameGear, "gg", "Game Gear", "gearsystem", EXTS(kExtGg), nullptr, 4, false, SupportLevel::NotBuilt},
 	{SystemId::Genesis, "genesis", "Genesis / Mega Drive", "picodrive", EXTS(kExtGenesis), nullptr, 8, false, SupportLevel::NotBuilt},
 	{SystemId::Genesis32X, "32x", "32X", "picodrive", EXTS(kExt32X), nullptr, 16, false, SupportLevel::NotBuilt},
-	{SystemId::SegaCd, "segacd", "Sega CD", "picodrive", EXTS(kExtDiscCue), "bios_CD_U.bin / E / J", 24, false, SupportLevel::NotBuilt},
-	{SystemId::Saturn, "saturn", "Sega Saturn", "mednafen_saturn", EXTS(kExtDiscCue), "sega_101.bin / mpr-17933.bin", 96, false, SupportLevel::NotBuilt},
+	{SystemId::SegaCd, "segacd", "Sega CD", "picodrive", EXTS(kExtDiscImage), "bios_CD_U.bin / E / J", 24, false, SupportLevel::NotBuilt},
+	{SystemId::Saturn, "saturn", "Sega Saturn", "mednafen_saturn", EXTS(kExtDiscImage), "sega_101.bin / mpr-17933.bin", 96, false, SupportLevel::NotBuilt},
 	{SystemId::Dreamcast, "dreamcast", "Dreamcast", "flycast", EXTS(kExtDreamcast), "dc_boot.bin / dc_flash.bin (recommended)", 96, false, SupportLevel::NotBuilt},
 	{SystemId::SegaPico, "picodrive_pico", "Sega Pico", "picodrive", EXTS(kExtPico), nullptr, 8, false, SupportLevel::NotBuilt},
 
@@ -446,7 +451,7 @@ const char *BuildId() {
 	// SPHYNX (stage 15): the stage number is part of the string on purpose - a
 	// screenshot of the failure panel then names the build exactly, which is how
 	// a screenshot from a device becomes a usable bug report.
-	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage16 (start-up+launch speed, libretro ABI ") +
+	static std::string id = std::string("sphynx-extcore-host 1.18.1-stage17 (every claiming core + real reason, libretro ABI ") +
 	                        std::to_string(RETRO_API_VERSION) + ")";
 	return id.c_str();
 }

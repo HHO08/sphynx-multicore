@@ -35,7 +35,28 @@ std::string g_system_dir;
 std::string g_save_dir;
 // PPSSPP's memstick root (".../PSP"): the parent of the SYSTEMS_BIOS tree.
 std::string g_memstick_dir;
+// Every PSP folder the app has been told about, in the order it learned them
+// (stage 17). See sphynx_ui_add_memstick_candidate().
+std::vector<std::string> g_memstick_candidates;
 std::string g_last_error = "none";
+
+// SPHYNX (stage 17): the folder of `system_key` the core should be pointed at -
+// the first known PSP root that really holds one of that system's files, else
+// the first root that has (or can have) the folder at all. Lives outside the
+// extern "C" block on purpose: it returns a std::string.
+std::string BestBiosDirForSystem(const char *system_key) {
+	if (!system_key || !*system_key) return std::string();
+	std::vector<std::string> roots = g_memstick_candidates;
+	if (!g_memstick_dir.empty()) roots.insert(roots.begin(), g_memstick_dir);
+	std::string first_existing;
+	for (const std::string &root : roots) {
+		const std::string dir = sphynx::BiosDirForSystem(root, system_key);
+		if (dir.empty()) continue;                       // system needs no BIOS
+		if (sphynx::BiosDirHasAnyFile(dir, system_key)) return dir;
+		if (first_existing.empty() && sphynx::DirectoryExists(dir)) first_existing = dir;
+	}
+	return first_existing;
+}
 
 struct FrameGrabber : sphynx::FrameSink {
 	int frames = 0;
@@ -436,16 +457,48 @@ const char *sphynx_ui_last_error(void) { return g_last_error.c_str(); }
 
 void sphynx_ui_set_memstick(const char *memstick_dir) {
 	g_memstick_dir = memstick_dir ? memstick_dir : "";
+	if (!g_memstick_dir.empty()) sphynx_ui_add_memstick_candidate(memstick_dir);
 }
 
+// SPHYNX (stage 17): a device can hold several PSP folders - /sdcard/PSP,
+// /sdcard/Android/media/PSP, an SD card copy - and the user's BIOS files are
+// only in one of them. Until now the *last* folder the Java side looked at won,
+// which is how a complete BIOS set became "missing BIOS" and a core refused the
+// game. Every folder the app learns about is kept here, in order, and the one
+// that actually contains a system's files is the folder that system is given.
+void sphynx_ui_add_memstick_candidate(const char *memstick_dir) {
+	if (!memstick_dir || !*memstick_dir) return;
+	const std::string dir = memstick_dir;
+	for (const std::string &known : g_memstick_candidates)
+		if (known == dir) return;
+	g_memstick_candidates.push_back(dir);
+}
+
+// The folder of `system_key` the core should be pointed at: the first candidate
+// that really holds one of that system's files, otherwise the first candidate
+// that has (or can have) the folder at all. Never returns a folder of a
+// different system, and never invents a folder when no root is known.
 int sphynx_ui_ensure_bios_tree(const char *memstick_dir) {
 	if (memstick_dir && *memstick_dir) g_memstick_dir = memstick_dir;
 	if (g_memstick_dir.empty()) {
 		g_last_error = "no memstick folder: the BIOS tree was not created";
 		return -1;
 	}
-	// The flight recorder lives next to the folders the user can find.
-	sphynx::SetLogPath(g_memstick_dir + "/sphynx_log.txt");
+	// The flight recorder lives next to the folders the user can find - when
+	// that folder is writable. On a real device the PSP folder may sit under
+	// Android/media, which the app can read but not write; there the log is
+	// moved to the app's own save folder instead of being silently empty
+	// (stage 17: the panel used to say "(log is empty)" in exactly that case).
+	const std::string memstick_log = g_memstick_dir + "/sphynx_log.txt";
+	if (sphynx::LogPathWritable(memstick_log)) {
+		sphynx::SetLogPath(memstick_log);
+	} else if (!g_save_dir.empty()) {
+		sphynx::SetLogPath(g_save_dir + "/sphynx_log.txt");
+		sphynx::Logf("log: %s is not writable, logging to %s instead",
+		             memstick_log.c_str(), sphynx::LogPath().c_str());
+	} else {
+		sphynx::SetLogPath(memstick_log);
+	}
 
 	// SPHYNX (stage 16, start-up speed): this runs before the first screen is
 	// drawn, and it used to do the whole create+adopt+rename pass every time -
@@ -491,7 +544,10 @@ const char *sphynx_ui_bios_root(void) {
 
 char *sphynx_ui_bios_dir_for_system(const char *system_key) {
 	if (!system_key || !*system_key || g_memstick_dir.empty()) return nullptr;
-	std::string dir = sphynx::BiosDirForSystem(g_memstick_dir, system_key);
+	// SPHYNX (stage 17): the folder that really holds this system's files, not
+	// simply the folder of whichever PSP root happened to be learned last.
+	std::string dir = BestBiosDirForSystem(system_key);
+	if (dir.empty()) dir = sphynx::BiosDirForSystem(g_memstick_dir, system_key);
 	if (dir.empty()) return nullptr;   // this system needs no BIOS
 	// Create it on demand: the user may have deleted the folder, or the app may
 	// have been reinstalled while the memory card stayed in place.
@@ -522,7 +578,17 @@ void sphynx_ui_prepare_bios(const char *system_key) {
 	// PSP/SYSTEM and PSP/, and they get the exact names the core opens.
 	const auto started = std::chrono::steady_clock::now();
 	std::string report;
-	const int fixed = sphynx::PrepareBiosForSystem(g_memstick_dir, system_key, &report);
+	// Prepare in every candidate root: the cheap pass only touches this one
+	// system's folder, so doing it for two or three roots still costs less than
+	// the whole-tree pass it replaces, and the folder that ends up being used is
+	// guaranteed to be the prepared one.
+	int fixed = sphynx::PrepareBiosForSystem(g_memstick_dir, system_key, &report);
+	for (const std::string &root : g_memstick_candidates) {
+		if (root == g_memstick_dir) continue;
+		std::string extra;
+		fixed += sphynx::PrepareBiosForSystem(root, system_key, &extra);
+		if (!extra.empty()) report += extra;
+	}
 	const double elapsed =
 		std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 	if (fixed > 0) {
@@ -535,7 +601,17 @@ void sphynx_ui_prepare_bios(const char *system_key) {
 }
 
 char *sphynx_ui_bios_report(const char *system_key) {
-	const std::string report = sphynx::BiosReport(g_memstick_dir, system_key);
+	// Stage 17: report the folder the core is really given, so the line on
+	// screen names the place the user must put the file into.
+	std::string report;
+	if (!system_key || !*system_key) {
+		report = "no system";
+	} else if (sphynx::FindBiosSystem(system_key)) {
+		const std::string dir = BestBiosDirForSystem(system_key);
+		report = sphynx::BiosReportInDir(dir.empty() ? std::string() : dir, system_key);
+	} else {
+		report = sphynx::BiosReport(g_memstick_dir, system_key);
+	}
 	char *out = static_cast<char *>(std::malloc(report.size() + 1));
 	if (!out) return nullptr;
 	std::memcpy(out, report.c_str(), report.size() + 1);
@@ -637,7 +713,23 @@ int sphynx_ui_is_known_extension(const char *path) {
 
 const char *sphynx_ui_bios_status(const char *system_key) {
 	static std::string status;
-	status = sphynx::BiosStatusForSystem(g_memstick_dir, system_key);
+	// SPHYNX (stage 17): the answer must describe the folder the core will be
+	// given, not the folder of whichever PSP root was learned last - otherwise
+	// a complete BIOS set reads as "missing" on screen while the game runs fine,
+	// or the other way round.
+	const std::string dir = BestBiosDirForSystem(system_key);
+	if (dir.empty()) {
+		status = sphynx::BiosStatusForSystem(g_memstick_dir, system_key);
+		return status.c_str();
+	}
+	const std::string missing = sphynx::MissingBiosFilesInDir(dir, system_key);
+	if (!sphynx::FindBiosSystem(system_key)) {
+		status = "no BIOS needed";
+	} else if (missing.empty()) {
+		status = "complete";
+	} else {
+		status = "missing " + missing;
+	}
 	return status.c_str();
 }
 

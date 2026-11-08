@@ -92,6 +92,13 @@ SPHYNX_UI_EXPORT int sphynx_ui_ensure_bios_tree(const char *memstick_dir);
 // path has not run yet, e.g. the player opened directly).
 SPHYNX_UI_EXPORT void sphynx_ui_set_memstick(const char *memstick_dir);
 
+// SPHYNX (stage 17): tell the host about one more PSP folder the device has.
+// Java reports every folder it knows (internal storage, Android/media, SD
+// card); the host then points each system at the folder that really contains
+// that system's BIOS files, instead of whichever folder was reported last.
+// Calling sphynx_ui_set_memstick() also registers its folder as a candidate.
+SPHYNX_UI_EXPORT void sphynx_ui_add_memstick_candidate(const char *memstick_dir);
+
 // "…/PSP/SYSTEMS_BIOS" or "" when unknown.
 SPHYNX_UI_EXPORT const char *sphynx_ui_bios_root(void);
 

@@ -26,6 +26,14 @@ namespace sphynx {
 
 // Where the log lives (usually <memstick>/sphynx_log.txt). Empty = disabled.
 void SetLogPath(const std::string &path);
+
+// SPHYNX (stage 17): true when a line could really be appended to `path` right
+// now. The memstick folder the user picked can be READ by the app but not
+// written (for example /storage/emulated/0/Android/media/PSP is another app's
+// media folder), and in that case every log line was lost without a word - the
+// failure panel then said "(log is empty)", which is the least useful thing it
+// can say. With this check the caller can fall back to a folder the app owns.
+bool LogPathWritable(const std::string &path);
 std::string LogPath();
 
 // Appends one line: "2026-11-06 22:10:03  text".

@@ -358,6 +358,77 @@ void TestReclaim(const std::string &stub_core, const std::string &sys, const std
 	}
 }
 
+// --- 6. a file the first core refuses (stage 17) -----------------------------
+//
+// The owner's screenshot: "core refused this content (unsupported format or
+// missing BIOS)" on many systems. A .cue is claimed by seven systems at once,
+// and the host used to ask exactly one of them. These checks drive the real
+// player API: the first candidate's core is deliberately unloadable, so the
+// game can only start if the host really moves on to the next system.
+void TestRefusalFallback(const std::string &stub_core, const std::string &sys, const std::string &save) {
+	std::printf("\n[6] the first core refuses: the next system must be tried\n");
+	const std::string libs = g_root + "/nativelib";
+	MkDirs(libs);
+	std::string bytes;
+	{
+		FILE *f = std::fopen(stub_core.c_str(), "rb");
+		if (f) {
+			char buffer[8192];
+			size_t n = 0;
+			while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) bytes.append(buffer, n);
+			std::fclose(f);
+		}
+	}
+	// Candidate order for a .cue is: Sega CD (picodrive), Saturn (mednafen_saturn).
+	// The first one is made unloadable - exactly what a core that cannot read
+	// the file looks like from here - and the second is the working stub.
+	WriteFile(libs + "/libsphynx_core_picodrive.so", std::string("this is not a library"));
+	WriteFile(libs + "/libsphynx_core_mednafen_saturn.so", bytes);
+	sphynx_ui_set_paths(libs.c_str(), sys.c_str(), save.c_str());
+
+	// A complete disc: cue + its track, so the "missing track" check stays quiet.
+	const std::string game = g_root + "/disc.cue";
+	WriteFile(g_root + "/disc.bin", std::string(4096, 'D'));
+	WriteFile(game, "FILE \"disc.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+
+	char err[512] = {};
+	SphynxPlayerHandle *player = sphynx_player_open(game.c_str(), nullptr, err, sizeof(err));
+	Check(player != nullptr, std::string("the game started on a later system: ") + err);
+	if (player) {
+		Check(std::string(sphynx_player_system_name(player)) == "Sega Saturn",
+		      std::string("and it is the Saturn core that runs it: ") + sphynx_player_system_name(player));
+		sphynx_player_close(player);
+	}
+
+	// Nothing can run it any more: the working stub is taken away, so every
+	// candidate really fails. The message must then name the missing track, not
+	// say "unsupported format or missing BIOS".
+	::unlink((libs + "/libsphynx_core_mednafen_saturn.so").c_str());
+	const std::string broken_cue = g_root + "/broken.cue";
+	WriteFile(broken_cue, "FILE \"not-here.bin\" BINARY\n  TRACK 01 MODE2/2352\n");
+	char err2[512] = {};
+	SphynxPlayerHandle *none = sphynx_player_open(broken_cue.c_str(), nullptr, err2, sizeof(err2));
+	Check(none == nullptr, "a disc whose track is missing does not start");
+	const std::string detail2 = err2;
+	Check(detail2.find("not-here.bin") != std::string::npos,
+	      std::string("the message names the missing file: ") + detail2);
+	Check(detail2.find("missing BIOS") == std::string::npos,
+	      "and it no longer blames the BIOS for it");
+
+	// An empty file is named as such.
+	const std::string empty = g_root + "/empty.gba";
+	WriteFile(empty, std::string());
+	char err3[512] = {};
+	Check(sphynx_player_open(empty.c_str(), nullptr, err3, sizeof(err3)) == nullptr,
+	      "an empty file is refused");
+	Check(std::string(err3).find("empty") != std::string::npos,
+	      std::string("and the message says the file is empty: ") + err3);
+
+	// The failure list is capped and readable: four systems at most.
+	Check(std::string(err2).find("·") != std::string::npos,
+	      "the message lists the systems that were tried");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		std::printf("usage: %s /path/to/libstub_core.so\n", argv[0]);
@@ -377,6 +448,7 @@ int main(int argc, char **argv) {
 	TestThumbnail(stub_core, g_root + "/nativelib", g_root + "/sys", g_root + "/save");
 	TestPlayerSession(stub_core, g_root + "/sys", g_root + "/save");
 	TestReclaim(stub_core, g_root + "/sys", g_root + "/save");
+	TestRefusalFallback(stub_core, g_root + "/sys", g_root + "/save");
 
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");

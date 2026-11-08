@@ -33,6 +33,15 @@ long SizeOf(const std::string &p) {
 
 void SetLogPath(const std::string &path) { g_path = path; }
 
+bool LogPathWritable(const std::string &path) {
+	if (path.empty()) return false;
+	// The real test, not a guess: open for append and write nothing meaningful.
+	FILE *f = std::fopen(path.c_str(), "ab");
+	if (!f) return false;
+	std::fclose(f);
+	return true;
+}
+
 std::string LogPath() { return g_path; }
 
 void LogLine(const std::string &text) {

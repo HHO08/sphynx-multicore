@@ -244,6 +244,16 @@ Java_org_sphynx_emulator_SphynxExtCore_nativeEnsureBiosTree(JNIEnv *env, jclass,
 	return made;
 }
 
+// SPHYNX (stage 17): one more PSP folder the device has. See
+// sphynx_ui_add_memstick_candidate() - a system is then pointed at the folder
+// that really contains its BIOS files.
+extern "C" JNIEXPORT void JNICALL
+Java_org_sphynx_emulator_SphynxExtCore_nativeAddMemstickCandidate(JNIEnv *env, jclass, jstring jmemstick) {
+	const char *p = jmemstick ? env->GetStringUTFChars(jmemstick, nullptr) : nullptr;
+	sphynx_ui_add_memstick_candidate(p ? p : "");
+	if (p) env->ReleaseStringUTFChars(jmemstick, p);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_org_sphynx_emulator_SphynxExtCore_nativeSetMemstick(JNIEnv *env, jclass, jstring jmemstick) {
 	const char *p = jmemstick ? env->GetStringUTFChars(jmemstick, nullptr) : nullptr;

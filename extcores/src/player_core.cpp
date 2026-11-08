@@ -25,8 +25,13 @@
 #include "sphynx_player_api.h"
 
 // Local mkdir -p for the core-options file.
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
 
 #include "sphynx_extcore.h"
 #include "sphynx_ui_api.h"
@@ -314,6 +319,143 @@ void StopWorker(SphynxPlayerHandle *p) {
 	p->quit = true;
 	if (p->worker.joinable()) p->worker.join();
 	p->dead = true;
+}
+
+// ---------------------------------------------------------------------------
+//  Why a core refuses a file (stage 17)
+//
+//  "core refused this content (unsupported format or missing BIOS)" is true for
+//  every possible cause, which makes it useless: the owner saw it on many
+//  systems and there was no way to tell a missing disc track from a missing
+//  BIOS from a format the core does not read. The two helpers below find the
+//  most common causes *before* the core is asked, so the message can name them.
+// ---------------------------------------------------------------------------
+
+bool FileReadable(const std::string &path) {
+	return !path.empty() && ::access(path.c_str(), R_OK) == 0;
+}
+
+long long SizeOfFile(const std::string &path) {
+	struct stat st;
+	if (::stat(path.c_str(), &st) != 0) return -1;
+	return static_cast<long long>(st.st_size);
+}
+
+std::string HumanSize(long long bytes) {
+	if (bytes < 0) return "?";
+	char buf[48];
+	if (bytes < 1024)
+		std::snprintf(buf, sizeof(buf), "%lld B", bytes);
+	else if (bytes < 1024 * 1024)
+		std::snprintf(buf, sizeof(buf), "%lld KiB", (bytes + 512) / 1024);
+	else
+		std::snprintf(buf, sizeof(buf), "%.1f MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+	return buf;
+}
+
+std::string ExtensionOf(const std::string &path) {
+	const size_t slash = path.find_last_of('/');
+	const size_t dot = path.find_last_of('.');
+	if (dot == std::string::npos) return std::string();
+	if (slash != std::string::npos && dot < slash) return std::string();
+	std::string ext = path.substr(dot + 1);
+	for (char &c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	return ext;
+}
+
+std::string DirectoryOf(const std::string &path) {
+	const size_t slash = path.find_last_of('/');
+	return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
+}
+
+// Does `name` exist inside `dir`, allowing for the capital letters the copy
+// tools of the various file managers produce?
+bool ExistsInDir(const std::string &dir, const std::string &name) {
+	if (FileReadable(dir + "/" + name)) return true;
+	DIR *d = ::opendir(dir.c_str());
+	if (!d) return false;
+	bool found = false;
+	while (struct dirent *entry = ::readdir(d)) {
+		const std::string candidate = entry->d_name;
+		if (candidate.size() != name.size()) continue;
+		bool same = true;
+		for (size_t i = 0; i < name.size() && same; ++i)
+			same = std::tolower(static_cast<unsigned char>(candidate[i])) ==
+			       std::tolower(static_cast<unsigned char>(name[i]));
+		if (same) {
+			found = true;
+			break;
+		}
+	}
+	::closedir(d);
+	return found;
+}
+
+// A .cue sheet names its tracks; a .gdi names its data tracks. When one of those
+// files is not next to the sheet - the usual result of copying only the small
+// file through the storage picker - every core refuses the disc, and the reason
+// "unsupported format or missing BIOS" is simply wrong.
+std::string MissingTrackReason(const std::string &local) {
+	const std::string ext = ExtensionOf(local);
+	const bool cue = ext == "cue";
+	const bool gdi = ext == "gdi" || ext == "m3u";
+	if (!cue && !gdi) return std::string();
+	FILE *f = std::fopen(local.c_str(), "rb");
+	if (!f) return std::string();
+	const std::string dir = DirectoryOf(local);
+	std::string missing;
+	char line[512];
+	while (std::fgets(line, sizeof(line), f)) {
+		std::string text = line;
+		std::string name;
+		if (cue) {
+			// FILE "name.bin" BINARY   (or without quotes)
+			const size_t at = text.find("FILE");
+			if (at == std::string::npos) continue;
+			size_t begin = text.find('"', at);
+			size_t end = std::string::npos;
+			if (begin != std::string::npos) {
+				end = text.find('"', begin + 1);
+				if (end == std::string::npos) continue;
+				name = text.substr(begin + 1, end - begin - 1);
+			} else {
+				// unquoted: everything between FILE and the track type
+				std::string rest = text.substr(at + 6);
+				while (!rest.empty() && rest.front() == ' ') rest.erase(rest.begin());
+				const size_t stop = rest.find_last_of(' ');
+				name = stop == std::string::npos ? rest : rest.substr(0, stop);
+			}
+		} else {
+			// GDI: line, LBA, type, sector size, "file", offset  -> 4th field
+			int field = 0;
+			size_t pos = 0;
+			while (pos < text.size()) {
+				const size_t space = text.find(' ', pos);
+				const std::string token = text.substr(pos, space == std::string::npos ? std::string::npos : space - pos);
+				if (++field == 5) {
+					name = token;
+					break;
+				}
+				if (space == std::string::npos) break;
+				pos = space + 1;
+			}
+			if (!name.empty() && name.front() == '"') name.erase(name.begin());
+			if (!name.empty() && name.back() == '"') name.pop_back();
+			if (!name.empty() && name.front() == '"') name.erase(name.begin());
+		}
+		while (!name.empty() && (name.back() == '\r' || name.back() == '\n' || name.back() == ' '))
+			name.pop_back();
+		// Absolute and Windows paths in old sheets: only the file name is useful.
+		const size_t slash = name.find_last_of("/\\");
+		if (slash != std::string::npos) name = name.substr(slash + 1);
+		if (name.empty()) continue;
+		if (ExistsInDir(dir, name)) continue;
+		if (!missing.empty()) missing += ", ";
+		missing += name;
+	}
+	std::fclose(f);
+	if (missing.empty()) return std::string();
+	return "the disc image(s) next to it are missing: " + missing;
 }
 
 // PPSSPP pad bits -> libretro RetroPad ids. This is the standard mapping every
@@ -660,154 +802,225 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	const std::string local = sphynx::LocalPathFor(path);
 	if (local.empty()) return fail("this file cannot be opened (the storage URI did not resolve)");
 
-	// 2. Which system? The caller may already know; otherwise ask the same
-	//    tables the game list uses.
-	const std::string key = (system_key && *system_key) ? std::string(system_key) : std::string();
-	std::string resolved = key;
-	if (resolved.empty()) {
-		const sphynx::DetectResult r = sphynx::Detect(local, nullptr, 0);
-		if (r.is_psp_native) return fail("this is a PSP game: PPSSPP plays it itself");
-		if (r.candidates.empty()) return fail("this file was not recognised as a game");
-		const sphynx::SystemInfo *info = sphynx::FindSystem(r.candidates.front().id);
-		if (!info) return fail("the detected system is not in this build");
-		resolved = info->key;
+	// 2. Which systems can play this file?
+	//
+	// SPHYNX (stage 17): this used to pick one system and give up when that
+	// core refused the file - which is what "core refused this content
+	// (unsupported format or missing BIOS)" was: a guess that nobody checked.
+	// A .cue/.chd/.bin is claimed by several systems at once, so the host now
+	// tries every system that claims the file, in the detector's order, and
+	// stops at the first that really starts. Nothing about the player, the
+	// buttons or the picture changes; a wrong guess is simply corrected.
+	const sphynx::DetectResult detected = sphynx::Detect(local, nullptr, 0);
+	std::vector<std::string> keys;
+	{
+		const std::string named = (system_key && *system_key) ? std::string(system_key) : std::string();
+		if (!named.empty()) keys.push_back(named);
+		for (const auto &candidate : detected.candidates) {
+			const sphynx::SystemInfo *info = sphynx::FindSystem(candidate.id);
+			if (!info || !info->key) continue;
+			if (std::find(keys.begin(), keys.end(), std::string(info->key)) != keys.end()) continue;
+			keys.push_back(info->key);
+		}
 	}
-	const sphynx::SystemInfo *sys = sphynx::FindSystemByKey(resolved.c_str());
-	if (!sys) return fail("unknown system key");
+	if (keys.empty()) {
+		if (detected.is_psp_native) return fail("this is a PSP game: PPSSPP plays it itself");
+		return fail("this file was not recognised as a game");
+	}
+	// A PSP disc is PPSSPP's own business: only an explicitly named system makes
+	// this layer look at it (that is the "PSP loader refused it" path).
+	if (detected.is_psp_native && !(system_key && *system_key))
+		return fail("this is a PSP game: PPSSPP plays it itself");
 
-	std::unique_ptr<SphynxPlayerHandle> p(new SphynxPlayerHandle());
-	p->system_key = resolved;
-	p->system_name = sys->display_name ? sys->display_name : resolved;
-	p->game_tag = SafeFileName(StripExtension(sphynx::DisplayNameOf(local)));
+	// What the file itself looks like - used in the message when every system
+	// refuses it, and to name the usual mistakes (empty file, missing track).
+	const std::string file_ext = ExtensionOf(local);
+	const long long file_size = SizeOfFile(local);
+	const std::string track_problem = MissingTrackReason(local);
+	std::string file_problem;
+	if (file_size == 0) file_problem = "the file is empty (0 bytes)";
+	else if (file_size < 0) file_problem = "the file cannot be read";
+	else if (!track_problem.empty()) file_problem = track_problem;
 
-	// 3. Where the core lives and where its BIOS/saves go.
-	const std::string core_path =
-		sphynx::CoreLibraryPathForSystem(sphynx_ui_native_lib_dir(), sys->key);
-	if (core_path.empty()) return fail("the emulator for this system is not in this build");
-	p->core_tag = CoreTagFromPath(core_path);
+	// One attempt: build the handle for `key` and let the core start on its own
+	// thread. Returns nullptr with a reason when the core refuses the game.
+	auto prepare = [&](const std::string &key, std::string *why) -> SphynxPlayerHandle * {
+		const sphynx::SystemInfo *sys = sphynx::FindSystemByKey(key.c_str());
+		if (!sys) {
+			if (why) *why = "unknown system";
+			return nullptr;
+		}
+		std::unique_ptr<SphynxPlayerHandle> p(new SphynxPlayerHandle());
+		p->system_key = key;
+		p->system_name = sys->display_name ? sys->display_name : key;
+		p->game_tag = SafeFileName(StripExtension(sphynx::DisplayNameOf(local)));
 
-	p->save_dir = sphynx_ui_save_dir();
-	if (p->save_dir.empty()) return fail("no save directory is known");
+		// 3. Where the core lives and where its BIOS/saves go.
+		const std::string core_path =
+			sphynx::CoreLibraryPathForSystem(sphynx_ui_native_lib_dir(), sys->key);
+		if (core_path.empty()) {
+			if (why) *why = "its emulator is not in this build";
+			return nullptr;
+		}
+		p->core_tag = CoreTagFromPath(core_path);
+		p->save_dir = sphynx_ui_save_dir();
+		if (p->save_dir.empty()) {
+			if (why) *why = "no save folder is known";
+			return nullptr;
+		}
 
-	// SPHYNX (stage 15): before the core is loaded, give its BIOS folder the
-	// exact file names it opens. This is what turns "I put the BIOS files there
-	// and the Nintendo DS still shows white screens" into a working game: the
-	// core uses a case-sensitive fopen("bios7.bin"), and "BIOS7.BIN" or
-	// "nds_bios7.bin" was invisible to it. Nothing is deleted; a wrong-cased
-	// name is renamed in place, and a prefixed one is copied under the exact
-	// name next to it.
-	sphynx_ui_prepare_bios(sys->key);
-	char *bios_dir = sphynx_ui_bios_dir_for_system(sys->key);
-	const std::string system_dir = bios_dir ? bios_dir : std::string(sphynx_ui_system_dir());
-	sphynx_ui_free(bios_dir);
-	p->bios_status = sphynx_ui_bios_status(sys->key);
-	char *bios_report = sphynx_ui_bios_report(sys->key);
-	p->bios_report = bios_report ? bios_report : "";
-	sphynx_ui_free(bios_report);
+		// SPHYNX (stage 15): before the core is loaded, give its BIOS folder the
+		// exact file names it opens (case, system prefix). Nothing is deleted.
+		sphynx_ui_prepare_bios(sys->key);
+		char *bios_dir = sphynx_ui_bios_dir_for_system(sys->key);
+		const std::string system_dir = bios_dir ? bios_dir : std::string(sphynx_ui_system_dir());
+		sphynx_ui_free(bios_dir);
+		p->bios_status = sphynx_ui_bios_status(sys->key);
+		char *bios_report = sphynx_ui_bios_report(sys->key);
+		p->bios_report = bios_report ? bios_report : "";
+		sphynx_ui_free(bios_report);
+		// The folder the core is really given: named in the log, so a "missing
+		// BIOS" report can be checked against the truth (stage 17).
+		sphynx::Logf("player: trying %s with %s (system dir: %s)",
+		             p->system_name.c_str(), p->core_tag.c_str(), system_dir.c_str());
 
-	// 4. Hand the pads outward, then start.
-	p->session.SetFrameSink(&p->frame);
-	p->audio_out = sphynx::CreateAudioOutput();
-	p->audio_push.reset(new AudioPush(p->audio_out.get()));
-	p->session.SetAudioSink(p->audio_push.get());
+		// 4. Hand the pads outward.
+		p->session.SetFrameSink(&p->frame);
+		p->audio_out = sphynx::CreateAudioOutput();
+		p->audio_push.reset(new AudioPush(p->audio_out.get()));
+		p->session.SetAudioSink(p->audio_push.get());
 
-	SphynxPlayerHandle *raw = p.get();
-	p->session.SetInputSource([raw](unsigned port, unsigned device, unsigned index, unsigned id) -> int16_t {
-		if (port != 0) return 0;
-		const unsigned bits = raw->buttons.load(std::memory_order_relaxed);
-		if (device == RETRO_DEVICE_JOYPAD) {
-			if (id == RETRO_DEVICE_ID_JOYPAD_MASK) {
-				unsigned mask = 0;
+		SphynxPlayerHandle *raw = p.get();
+		p->session.SetInputSource([raw](unsigned port, unsigned device, unsigned index, unsigned id) -> int16_t {
+			if (port != 0) return 0;
+			const unsigned bits = raw->buttons.load(std::memory_order_relaxed);
+			if (device == RETRO_DEVICE_JOYPAD) {
+				if (id == RETRO_DEVICE_ID_JOYPAD_MASK) {
+					unsigned mask = 0;
+					for (unsigned bit = 0; bit < 16; ++bit) {
+						const unsigned pad_bit = 1u << bit;
+						const int joy = PadIdForBit(pad_bit);
+						if (joy >= 0 && (bits & pad_bit)) mask |= 1u << joy;
+					}
+					return static_cast<int16_t>(mask);
+				}
 				for (unsigned bit = 0; bit < 16; ++bit) {
 					const unsigned pad_bit = 1u << bit;
-					const int joy = PadIdForBit(pad_bit);
-					if (joy >= 0 && (bits & pad_bit)) mask |= 1u << joy;
+					if (PadIdForBit(pad_bit) == static_cast<int16_t>(id))
+						return (bits & pad_bit) ? 1 : 0;
 				}
-				return static_cast<int16_t>(mask);
+				return 0;
 			}
-			for (unsigned bit = 0; bit < 16; ++bit) {
-				const unsigned pad_bit = 1u << bit;
-				if (PadIdForBit(pad_bit) == static_cast<int16_t>(id))
-					return (bits & pad_bit) ? 1 : 0;
+			if (device == RETRO_DEVICE_ANALOG) {
+				const float x = index == 0 ? raw->lx.load(std::memory_order_relaxed)
+				                           : raw->rx.load(std::memory_order_relaxed);
+				const float y = index == 0 ? raw->ly.load(std::memory_order_relaxed)
+				                           : raw->ry.load(std::memory_order_relaxed);
+				if (id == RETRO_DEVICE_ID_ANALOG_X) return ToAxis(x);
+				if (id == RETRO_DEVICE_ID_ANALOG_Y) return ToAxis(-y);   // core wants +up
 			}
 			return 0;
+		});
+
+		// SPHYNX (stage 11): no frame-budget watchdog during playback. A slow
+		// frame is not a failure; only the core or the user may stop a game.
+		p->session.SetWatchdogMs(0);
+
+		// The user's own values first, then the recommended ones (stage 15).
+		p->session.EnvMutable().SetInitialOptions(LoadOptions(OptionsFilePath(p.get())));
+		p->session.EnvMutable().SetRecommendations(p->core_tag);
+
+		// 5. Battery save path: the worker writes it while it runs.
+		p->sram_path = sphynx::StateFilePath(p->save_dir, p->game_tag + ".sram", 0);
+		{
+			const size_t dot = p->sram_path.find_last_of('.');
+			if (dot != std::string::npos) p->sram_path = p->sram_path.substr(0, dot) + ".srm";
 		}
-		if (device == RETRO_DEVICE_ANALOG) {
-			const float x = index == 0 ? raw->lx.load(std::memory_order_relaxed)
-			                           : raw->rx.load(std::memory_order_relaxed);
-			const float y = index == 0 ? raw->ly.load(std::memory_order_relaxed)
-			                           : raw->ry.load(std::memory_order_relaxed);
-			if (id == RETRO_DEVICE_ID_ANALOG_X) return ToAxis(x);
-			if (id == RETRO_DEVICE_ID_ANALOG_Y) return ToAxis(-y);   // core wants +up
+
+		// 6. Start the core on its own thread and wait for the outcome.
+		SphynxPlayerHandle *handle = p.release();
+		{
+			std::unique_lock<std::mutex> lock(handle->start_mutex);
+			handle->worker = std::thread(PlayerWorker, handle, core_path, local, system_dir);
+			if (!handle->start_cv.wait_for(lock, std::chrono::seconds(30),
+			                               [handle] { return handle->started.load(); })) {
+				handle->start_error = "the emulator did not start within 30 seconds";
+				handle->failed = true;
+			}
 		}
-		return 0;
-	});
+		if (handle->failed.load()) {
+			// `handle` owns everything now: p was released above and must not be
+			// touched again (stage 17 - reading p->bios_status here crashed the
+			// whole player the first time this path was taken).
+			std::string message = handle->start_error.empty()
+			                          ? "the emulator refused this game"
+			                          : handle->start_error;
+			// The full text (with the dlopen path, for the log) stays here; the
+			// one line that goes on screen is shortened below.
+			const std::string full_message = message;
+			if (message.find("cannot load") != std::string::npos)
+				message = "its emulator could not be loaded";
+			// The most useful sentence of the whole program: say what is wrong
+			// with *this* system when we can tell (stage 17).
+			if (!file_problem.empty())
+				message += " — " + file_problem;
+			else if (handle->bios_status.rfind("missing", 0) == 0)
+				message += " — this system needs its BIOS: " + handle->bios_status;
+			sphynx::LogLine("player: " + handle->system_name + " refused it: " + full_message);
+			sphynx::LogLine("  bios: " + handle->bios_report);
+			// One short line per system is what fits on the failure panel; a
+			// reason longer than that is cut, never dropped silently.
+			if (message.size() > 90) message = message.substr(0, 88) + "…";
+			if (why) *why = message;
+			StopWorker(handle);
+			delete handle;
+			return nullptr;
+		}
 
-	// SPHYNX (core-running system, stage 11): the frame-budget watchdog is off
-	// for playback. It used to stop the core when a single retro_run() took more
-	// than 10 s - which a CD-based system (PlayStation, Saturn, Sega CD) or the
-	// very first frame of melonDS/DOSBox does routinely on a 32-bit ARM phone.
-	// The visible result was "the game closes by itself a few seconds after it
-	// starts": the core was killed by our own watchdog, not by the game.
-	//
-	// V5 has no such watchdog at all: RetroHost::RunFrame() simply runs the core
-	// and the screen keeps going. A slow frame is not a failure, so nothing here
-	// may ever decide to stop the game. Only the core itself, or the user, may.
-	p->session.SetWatchdogMs(0);
+		handle->fps = handle->session.FrameRate();
+		if (handle->fps <= 20.0 || handle->fps > 200.0) handle->fps = 60.0;
+		return handle;
+	};
 
-	// SPHYNX (stage 13): the core declares its options during retro_init(), so the
-	// values chosen last time for this system are handed over now and applied the
-	// moment the declaration arrives.
-	p->session.EnvMutable().SetInitialOptions(LoadOptions(OptionsFilePath(p.get())));
-	// SPHYNX (stage 15): and, for everything the user never chose, the best
-	// value this build knows for this core (see core_defaults.h). Applied while
-	// the core declares its options, i.e. before it starts running.
-	p->session.EnvMutable().SetRecommendations(p->core_tag);
-
-	// 5. Battery save path first: the worker writes it while it runs.
-	p->sram_path = sphynx::StateFilePath(p->save_dir, p->game_tag + ".sram", 0);
-	{
-		const size_t dot = p->sram_path.find_last_of('.');
-		if (dot != std::string::npos) p->sram_path = p->sram_path.substr(0, dot) + ".srm";
+	// 7. Try them in order. The first one that starts wins; the failures are kept
+	//    so that a file no system can run produces a message that says why.
+	std::vector<std::pair<std::string, std::string>> tried;
+	SphynxPlayerHandle *handle = nullptr;
+	for (const std::string &key : keys) {
+		std::string why;
+		handle = prepare(key, &why);
+		if (handle) {
+			if (!tried.empty())
+				sphynx::LogLine("player: " + handle->system_name +
+				                " was the system that could run this file");
+			break;
+		}
+		std::string name = key;
+		if (const sphynx::SystemInfo *info = sphynx::FindSystemByKey(key.c_str()))
+			if (info->display_name) name = info->display_name;
+		tried.emplace_back(name, why);
 	}
-
-	// 6. Start the core on its own thread and wait for the outcome. The wait is
-	//    bounded: a core that never reports back must not hang the UI, and a
-	//    refusal has to arrive as a readable message, not as a dead screen.
-	SphynxPlayerHandle *handle = p.release();
-	{
-		std::unique_lock<std::mutex> lock(handle->start_mutex);
-		handle->worker = std::thread(PlayerWorker, handle, core_path, local, system_dir);
-		if (!handle->start_cv.wait_for(lock, std::chrono::seconds(30),
-		                               [handle] { return handle->started.load(); })) {
-			handle->start_error = "the emulator did not start within 30 seconds";
-			handle->failed = true;
-		}
-	}
-	if (handle->failed.load()) {
-		const std::string message = handle->start_error.empty()
-		                                ? "the emulator refused this game"
-		                                : handle->start_error;
+	if (!handle) {
+		// A message the user can act on, and a screenshot of it that is worth
+		// sending: the file, then one line per system that was tried.
+		std::string message = "This file could not be started by any system that claims it.";
+		if (file_size >= 0)
+			message += "\n" + sphynx::DisplayNameOf(local) + " (" + HumanSize(file_size) +
+			           (file_ext.empty() ? "" : ", ." + file_ext) + ")";
+		if (!file_problem.empty()) message += "\n" + file_problem;
+		for (size_t i = 0; i < tried.size() && i < 4; ++i)
+			message += "\n· " + tried[i].first + ": " + tried[i].second;
 		if (err && err_size) std::snprintf(err, err_size, "%s", message.c_str());
-		sphynx::LogLine(std::string("player: start failed: ") + message);
-		handle->quit = true;
-		if (handle->worker.joinable()) handle->worker.join();
+		sphynx::LogLine("player: no system could run " + local);
 		return nullptr;
 	}
 
-	handle->fps = handle->session.FrameRate();
-	if (handle->fps <= 20.0 || handle->fps > 200.0) handle->fps = 60.0;
-
 	// LoadBatterySave() reads core memory, so it happens on the core thread
 	// (inside Session::Start's caller) - see PlayerWorker.
-
 	g_active_handle.store(handle);
 	handle->status = handle->system_name;
 	SetStatus(handle);
 	sphynx::LogLine("PLAYER: opened " + local + " (" + handle->system_key + " / " + handle->core_tag + ")");
-	// The two things a bug report about "it does not start" or "it lags" needs:
-	// which BIOS files the core can really see, and which settings it started
-	// with. Both are written to PSP/sphynx_log.txt and shown on screen.
 	sphynx::LogLine("  bios: " + handle->bios_report);
 	if (handle->session.Env().RecommendedCount() > 0) {
 		sphynx::LogLine("  recommended settings applied: " +

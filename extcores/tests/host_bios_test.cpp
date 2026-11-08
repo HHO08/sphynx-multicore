@@ -357,6 +357,68 @@ void TestStartupCost() {
 }
 
 // ---------------------------------------------------------------------------
+//  1d. Which PSP folder the core is given (stage 17)
+//
+//  A device can hold more than one PSP folder, and the user's BIOS files are in
+//  one of them. The core used to be pointed at whichever folder the Java side
+//  reported last, which is how a complete BIOS set became "missing BIOS" and
+//  the core refused the game.
+// ---------------------------------------------------------------------------
+void TestBestFolder() {
+	std::printf("\n[the folder that really holds the files wins (stage 17)]\n");
+	const std::string empty_root = g_root + "/psp-empty";
+	const std::string full_root = g_root + "/psp-full";
+	MkDirs(empty_root);
+	MkDirs(full_root);
+	sphynx::EnsureBiosTree(empty_root, nullptr);
+	sphynx::EnsureBiosTree(full_root, nullptr);
+
+	// Only the second root has the DS files.
+	const std::string nds_full = sphynx::BiosDirForSystem(full_root, "nds");
+	WriteFile(nds_full + "/bios7.bin", std::string(1024, '7'));
+	WriteFile(nds_full + "/bios9.bin", std::string(1024, '9'));
+	WriteFile(nds_full + "/firmware.bin", std::string(2048, 'F'));
+
+	// The active (last reported) root is the EMPTY one - the old behaviour.
+	sphynx_ui_add_memstick_candidate(empty_root.c_str());
+	sphynx_ui_add_memstick_candidate(full_root.c_str());
+	sphynx_ui_set_memstick(empty_root.c_str());
+
+	char *dir = sphynx_ui_bios_dir_for_system("nds");
+	Check(dir != nullptr, "a folder was found for the Nintendo DS");
+	if (dir) {
+		const std::string chosen = dir;
+		Check(chosen == nds_full,
+		      ("the folder with the files is chosen, not the empty one: " + chosen).c_str());
+		sphynx_ui_free(dir);
+	}
+	char *report = sphynx_ui_bios_report("nds");
+	Check(report && std::string(report).find("bios7.bin (1 KiB)") != std::string::npos,
+	      "and the report describes the files that were found");
+	if (report) sphynx_ui_free(report);
+	Check(sphynx_ui_bios_status("nds") == std::string("complete"),
+	      "so the system reports complete instead of missing");
+
+	// A system with nothing anywhere: the folder of the active root is used, so
+	// the user still gets a place to put the file.
+	char *psx_dir = sphynx_ui_bios_dir_for_system("psx");
+	Check(psx_dir != nullptr, "a system without files still gets its folder");
+	if (psx_dir) sphynx_ui_free(psx_dir);
+
+	// The report for an explicit folder, used by the player.
+	const std::string r = sphynx::BiosReportInDir(nds_full, "nds");
+	Check(r.find("Nintendo DS") != std::string::npos, "BiosReportInDir() names the system");
+	Check(r.find("missing") == std::string::npos, "and reports nothing missing here");
+
+	// Log fallback: a folder that cannot be written is detected instead of
+	// silently swallowing every line (the panel used to say "log is empty").
+	Check(!sphynx::LogPathWritable("/this/does/not/exist/sphynx_log.txt"),
+	      "an unwritable log path is reported as unwritable");
+	const std::string good = g_root + "/log-test.txt";
+	Check(sphynx::LogPathWritable(good), "a writable one is reported as writable");
+}
+
+// ---------------------------------------------------------------------------
 //  2. The C surface PPSSPP's UI and Java use
 // ---------------------------------------------------------------------------
 void TestUiApi() {
@@ -489,6 +551,7 @@ int main() {
 	TestMissingAndAdoption();
 	TestBiosFileNames();
 	TestStartupCost();
+	TestBestFolder();
 	TestUiApi();
 	TestSaveStates();
 	TestDiagLog();

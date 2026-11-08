@@ -98,6 +98,11 @@ int NormalizeBiosNames(const std::string &memstick_dir, std::string *report);
 // there and the core still refuses it".
 std::string BiosReport(const std::string &memstick_dir, const char *system_key);
 
+// Same report for an explicit folder (stage 17): the player already knows which
+// folder it will hand the core, so it does not have to rebuild the path - and
+// with several PSP roots on the device the two could disagree.
+std::string BiosReportInDir(const std::string &dir, const char *system_key);
+
 // ---------------------------------------------------------------------------
 //  Start-up cost (stage 16)
 //
@@ -141,6 +146,11 @@ std::string MissingBiosFilesInDir(const std::string &bios_dir, const char *syste
 // Human readable status of one system: "complete", "missing A, B" or
 // "no BIOS needed". Used by the player's failure screen.
 std::string BiosStatusForSystem(const std::string &memstick_dir, const char *system_key);
+
+// SPHYNX (stage 17): true when `dir` holds at least one of the files this
+// system needs (any capitalisation). Used to decide *which* PSP folder is the
+// one the user actually filled, when several PSP folders exist on the device.
+bool BiosDirHasAnyFile(const std::string &dir, const char *system_key);
 
 // True when the path exists and is a regular file (small helper, also used by
 // the tests; exposed so callers do not repeat the stat dance).

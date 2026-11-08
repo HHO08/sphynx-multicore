@@ -144,11 +144,29 @@ public final class SphynxExtCore {
 		File external = Environment.getExternalStorageDirectory();
 		roots.add(new File(external, "PSP").getAbsolutePath());
 		roots.add(new File(external, "Android/media/PSP").getAbsolutePath());
+
+		// SPHYNX (stage 17): tell the native side about EVERY PSP folder on the
+		// device before anything else. The folder that is handed to a core is
+		// then the one that really contains that system's BIOS files, instead of
+		// whichever folder this loop happened to look at last - which is how a
+		// full BIOS set became "missing BIOS" and the core refused the game.
+		java.util.ArrayList<String> usable = new java.util.ArrayList<>();
 		for (String root : roots) {
 			if (root == null || root.isEmpty()) continue;
-			File dir = new File(root);
-			if (!dir.isDirectory()) continue;      // never invent a folder the user does not have
-			nativeSetMemstick(root);
+			if (!new File(root).isDirectory()) continue;   // never invent a folder
+			nativeAddMemstickCandidate(root);
+			usable.add(root);
+		}
+
+		boolean first = true;
+		for (String root : usable) {
+			// The first folder is the one PPSSPP itself uses: it stays the active
+			// one (it is where the log and the tree live), the others are only
+			// prepared and registered.
+			if (first) {
+				nativeSetMemstick(root);
+				first = false;
+			}
 			int made = nativeEnsureBiosTree(root);
 			Log.i(TAG, "BIOS tree at " + nativeBiosRoot() + " (" + made + " new folders)");
 		}
@@ -336,6 +354,10 @@ public final class SphynxExtCore {
 	}
 
 	private static native void nativeSetPaths(String nativeLibraryDir, String systemDir, String saveDir);
+
+	// SPHYNX (stage 17): every PSP folder the device has, so the host can pick
+	// the one that actually holds a system's BIOS files.
+	private static native void nativeAddMemstickCandidate(String memstickDir);
 	private static native void nativeSetMemstick(String memstickDir);
 	private static native void nativeSetContext(Context context);
 	private static native int nativeEnsureBiosTree(String memstickDir);

@@ -658,10 +658,19 @@ int NormalizeBiosNames(const std::string &memstick_dir, std::string *report) {
 	return fixed;
 }
 
-std::string BiosReport(const std::string &memstick_dir, const char *system_key) {
+bool BiosDirHasAnyFile(const std::string &dir, const char *system_key) {
+	const BiosSystem *s = FindBiosSystem(system_key);
+	if (!s || dir.empty() || !DirectoryExists(dir)) return false;
+	const auto listing = ReadListing(dir);
+	for (int i = 0; i < s->file_count; ++i) {
+		if (!FindLooseIn(listing, s->files[i]).empty()) return true;
+	}
+	return false;
+}
+
+std::string BiosReportInDir(const std::string &dir, const char *system_key) {
 	const BiosSystem *s = FindBiosSystem(system_key);
 	if (!s) return std::string(system_key ? system_key : "?") + " · no BIOS needed";
-	const std::string dir = BiosDirForSystem(memstick_dir, system_key);
 	std::string out = s->system_key;
 	out += " · ";
 	out += dir.empty() ? "(no folder)" : dir;
@@ -687,6 +696,10 @@ std::string BiosReport(const std::string &memstick_dir, const char *system_key) 
 	if (!s->mandatory && found.empty())
 		out += " · optional, but this system works far better with it";
 	return out;
+}
+
+std::string BiosReport(const std::string &memstick_dir, const char *system_key) {
+	return BiosReportInDir(BiosDirForSystem(memstick_dir, system_key), system_key);
 }
 
 std::string BiosStatusForSystem(const std::string &memstick_dir, const char *system_key) {
