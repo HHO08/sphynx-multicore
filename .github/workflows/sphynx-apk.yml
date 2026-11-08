@@ -156,7 +156,8 @@ jobs:
               extcores/src/android_paths.cpp extcores/src/ui_api.cpp \
               extcores/src/bios_layout.cpp extcores/src/state_file.cpp \
               extcores/src/diag_log.cpp extcores/src/player_core.cpp \
-              extcores/src/player_audio.cpp extcores/src/core_defaults.cpp
+              extcores/src/player_audio.cpp extcores/src/core_defaults.cpp \
+              extcores/src/hw_render.cpp
 
           # Stage 9: the player core that PPSSPP's own screen drives. It has no
           # host test (it needs a core to run), but it must at least compile
