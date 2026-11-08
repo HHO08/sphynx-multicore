@@ -429,6 +429,77 @@ void TestRefusalFallback(const std::string &stub_core, const std::string &sys, c
 	      "the message lists the systems that were tried");
 }
 
+// --- 7. a core that faults must not close the app (stage 18) -----------------
+//
+// The owner's report: on a few systems, tapping a game throws him out of the
+// app. That is the process dying inside the core. These checks fault for real
+// (the stub writes through a null pointer, see stub_core.c) and require that
+// the host survives, that the screen gets an honest reason, and that a core
+// which dies while loading is skipped in favour of the next system.
+void TestCrashIsContained(const std::string &stub_core, const std::string &sys, const std::string &save) {
+	std::printf("\n[7] a crashing core is contained, never the whole app\n");
+	const std::string libs = g_root + "/nativelib";
+	MkDirs(libs);
+	std::string bytes;
+	{
+		FILE *f = std::fopen(stub_core.c_str(), "rb");
+		if (f) {
+			char buffer[8192];
+			size_t n = 0;
+			while ((n = std::fread(buffer, 1, sizeof(buffer), f)) > 0) bytes.append(buffer, n);
+			std::fclose(f);
+		}
+	}
+	Check(!bytes.empty(), "the stub core was read");
+	WriteFile(libs + "/libsphynx_core_gambatte.so", bytes);
+	sphynx_ui_set_paths(libs.c_str(), sys.c_str(), save.c_str());
+	const std::string rom = g_root + "/crash.gb";
+	WriteFile(rom, std::string(4096, 'R'));
+
+	// (a) The core faults on its third frame, while the user is playing.
+	setenv("SPHYNX_STUB_CRASH_AFTER", "2", 1);
+	char err[512] = {};
+	SphynxPlayerHandle *player = sphynx_player_open(rom.c_str(), "gb", err, sizeof(err));
+	Check(player != nullptr, std::string("the game still starts: ") + err);
+	if (player) {
+		// Give the emulation thread time to reach the fault.
+		for (int i = 0; i < 200 && sphynx_player_run(player) >= 0; ++i) usleep(10000);
+		Check(sphynx_player_run(player) < 0, "the crash stops that game, not the app");
+		const std::string why = sphynx_player_status(player);
+		Check(why.find("crashed") != std::string::npos,
+		      std::string("and the reason on screen says so: ") + why);
+		sphynx_player_close(player);
+	}
+	unsetenv("SPHYNX_STUB_CRASH_AFTER");
+
+	// (b) The core faults while loading: the next system that claims the file
+	// must be tried, exactly as for a core that returns false.
+	setenv("SPHYNX_STUB_CRASH_ON_LOAD", "1", 1);
+	WriteFile(libs + "/libsphynx_core_picodrive.so", bytes);
+	WriteFile(libs + "/libsphynx_core_mednafen_saturn.so", bytes);
+	const std::string disc = g_root + "/crashdisc.cue";
+	WriteFile(g_root + "/crashdisc.bin", std::string(4096, 'D'));
+	WriteFile(disc, "FILE \"crashdisc.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+	char err2[512] = {};
+	SphynxPlayerHandle *none = sphynx_player_open(disc.c_str(), nullptr, err2, sizeof(err2));
+	Check(none == nullptr, "a disc whose every core crashes is refused, the app lives");
+	Check(std::string(err2).find("crashed") != std::string::npos,
+	      std::string("and every line says the core crashed: ") + err2);
+	unsetenv("SPHYNX_STUB_CRASH_ON_LOAD");
+
+	// (c) The core loads, then dies on its first frame. That used to count as
+	// "started", so the user got a game that threw him out a second later; now
+	// the next system is tried while one is left, and when none is left the
+	// message names the crash.
+	setenv("SPHYNX_STUB_CRASH_AFTER", "0", 1);
+	char err3[512] = {};
+	SphynxPlayerHandle *late = sphynx_player_open(disc.c_str(), nullptr, err3, sizeof(err3));
+	Check(late == nullptr, "a core that dies on its first frame is not accepted as running");
+	Check(std::string(err3).find("crashed") != std::string::npos,
+	      std::string("and the message names the crash: ") + err3);
+	unsetenv("SPHYNX_STUB_CRASH_AFTER");
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		std::printf("usage: %s /path/to/libstub_core.so\n", argv[0]);
@@ -449,6 +520,7 @@ int main(int argc, char **argv) {
 	TestPlayerSession(stub_core, g_root + "/sys", g_root + "/save");
 	TestReclaim(stub_core, g_root + "/sys", g_root + "/save");
 	TestRefusalFallback(stub_core, g_root + "/sys", g_root + "/save");
+	TestCrashIsContained(stub_core, g_root + "/sys", g_root + "/save");
 
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");

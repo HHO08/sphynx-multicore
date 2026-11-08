@@ -397,7 +397,7 @@ void SphynxPlayerScreen::CreateViews() {
 	// is not PPSSPP's own: it names the build and says whether frames are
 	// arriving. Without it, "the app threw me out" and "the core never drew a
 	// frame" look exactly the same from a photograph-free bug report.
-	statusView_ = root_->Add(new TextView("Sphynx", new AnchorLayoutParams(dp(8), dp(6), NONE, NONE, false)));
+	statusView_ = root_->Add(new TextView("", new AnchorLayoutParams(dp(8), dp(6), NONE, NONE, false)));
 	statusView_->SetSmall(true);
 	statusView_->SetShadow(true);
 	statusView_->SetTextColor(0xFFE0E0E0);
@@ -551,11 +551,9 @@ void SphynxPlayerScreen::StartGame() {
 	lastTime_ = time_now_d();
 	startTime_ = lastTime_;
 	frameDebt_ = 0.0;
-	// One line on screen naming the system and the build: it is how the user can
-	// tell this apart from any earlier player, without hunting through menus.
-	g_OSD.Show(OSDType::MESSAGE_INFO,
-		StringFromFormat("Sphynx player %s · %s", PPSSPP_GIT_VERSION, sphynx_player_system_name(player_)),
-		2.5f);
+	// One short line on screen naming the system. SPHYNX (stage 18): the build
+	// name and the version are gone - the owner asked for the system only.
+	g_OSD.Show(OSDType::MESSAGE_INFO, sphynx_player_system_name(player_), 1.5f);
 	sphynx_ui_log_line((std::string("player screen: running ") + gamePath_.ToString()).c_str());
 }
 
@@ -795,34 +793,25 @@ void SphynxPlayerScreen::ShowProblem(const std::string &title, const std::string
 void SphynxPlayerScreen::UpdateStatusLine() {
 	if (!statusView_ || failed_)
 		return;
-	char line[256];
-	const float padOpacity = g_Config.iTouchButtonOpacity / 100.0f;
-	// The two numbers that decide whether a game "lags": how many frames the core
-	// delivers per second, and how long one emulated frame takes. Both are
-	// measured on the core thread, so they can be compared with V5's behaviour
-	// instead of described by feel.
-	// SPHYNX (stage 15): one extra field, "bios ok" / "bios x", only for the
-	// systems that have a BIOS folder. It is the difference between "the core is
-	// slow" and "the core has no BIOS" on a screenshot.
-	std::string bios_field;
-	if (player_) {
-		const std::string status = sphynx_player_bios_status(player_);
-		if (!status.empty() && status != "no BIOS needed")
-			bios_field = std::string(" · bios ") + (status == "complete" ? "ok" : "MISSING");
+	char line[128];
+	// SPHYNX (stage 18): three things and nothing else - the system, the picture
+	// size ("quality") and the frame rate. The build name, the version, the pad
+	// state, the frame counter and the millisecond timing were all noise on top
+	// of a game, and the owner asked for a line that is clean and easy on the
+	// eye. The measurements are unchanged; they are simply no longer written
+	// over the picture.
+	if (!player_) {
+		std::snprintf(line, sizeof(line), "%s", SystemName().empty() ? "starting" : SystemName().c_str());
+	} else {
+		// The size of the picture the core is producing (what the line calls the
+		// quality), read without consuming the frame that is waiting.
+		int width = texWidth_, height = texHeight_;
+		if (width <= 0 || height <= 0) sphynx_player_frame_size(player_, &width, &height);
+		std::snprintf(line, sizeof(line), "%s · %dx%d · %.1f FPS",
+		              SystemName().empty() ? "?" : SystemName().c_str(),
+		              width, height,
+		              sphynx_player_measured_fps(player_));
 	}
-	std::snprintf(line, sizeof(line),
-	              "Sphynx %s · %s%s%s · %dx%d · %.1f fps · %.1f ms · up:%llu · pad %s%s",
-	              PPSSPP_GIT_VERSION,
-	              player_ ? (SystemName().empty() ? "?" : SystemName().c_str()) : "starting",
-	              stopped_ ? " · stopped" : "",
-	              sound_ ? "" : " · muted",
-	              texWidth_, texHeight_,
-	              player_ ? sphynx_player_measured_fps(player_) : 0.0,
-	              player_ ? sphynx_player_frame_ms(player_) : 0.0,
-	              framesDrawn_,
-	              padForcedOn_ ? "on(auto)" : (g_Config.bShowTouchControls ? "on" : "OFF"),
-	              bios_field.c_str());
-	(void)padOpacity;
 	statusView_->SetText(line);
 }
 

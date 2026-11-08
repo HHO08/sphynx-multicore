@@ -271,9 +271,12 @@ def main(root: str) -> int:
     core = repo / "extcores" / "src" / "player_core.cpp"
     if core.exists():
         text = core.read_text(encoding="utf-8", errors="surrogateescape")
-        if "std::thread(PlayerWorker" not in text:
+        # Stage 18: the thread is created with pthread_create() so its stack can
+        # be sized (CoreStackBytes) and joined with pthread_join(); either form
+        # satisfies the rule that emulation is off the UI thread and is joined.
+        if not (("std::thread(PlayerWorker" in text) or ("pthread_create(&handle->worker" in text)):
             problems.append("extcores/src/player_core.cpp runs the core on the UI thread again")
-        if "p->worker.join()" not in text:
+        if not (("p->worker.join()" in text) or ("pthread_join(p->worker" in text)):
             problems.append("extcores/src/player_core.cpp never joins the emulation thread")
 
     #    c) The game must not be stopped by us. The frame-budget watchdog used to

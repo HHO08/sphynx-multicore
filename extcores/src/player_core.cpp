@@ -26,6 +26,7 @@
 
 // Local mkdir -p for the core-options file.
 #include <dirent.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -48,6 +49,10 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <csetjmp>
+#include <csignal>
+#include <cstdlib>
+#include <new>
 #include <thread>
 #include <cstdio>
 #include <cstring>
@@ -76,6 +81,106 @@ std::mutex g_one_core_mutex;
 std::atomic<SphynxPlayerHandle *> g_active_handle{nullptr};
 
 void StopWorker(SphynxPlayerHandle *p);   // defined below, needs the layout
+
+// ---------------------------------------------------------------------------
+//  A core that dies must not take the app with it (stage 18)
+//
+//  "the app ejects me when I tap this game" on a handful of systems is the
+//  process ending: the game list the owner lands on is a restarted app, not a
+//  deliberate exit. Two things make that happen with a libretro core:
+//
+//   1. Stack. A default pthread gets 1 MB here. Several of the bundled cores are
+//      desktop builds with deep call chains (DOSBox, ScummVM, PUAE, FBNeo,
+//      the mednafen cores) and overflow that 1 MB on the first frames: the
+//      guard page turns it into SIGSEGV and the whole process is gone.
+//   2. The core itself faulting. A wrong guess at what the file is (a .bin that
+//      is not a Mega Drive ROM, a .cue the core cannot parse) can make it write
+//      through a null pointer instead of returning an error, and then there is
+//      no process left to show a message in.
+//
+//  So the emulation thread now gets a real stack (CoreStackBytes) and every
+//  call into the core is armed with a landing point. If the core faults anyway,
+//  the thread lands back here, the crashed core is dropped untouched, and the
+//  next system that claims the file is tried - which is how the few systems
+//  that were "ejecting" become systems that just work, and how the rest get an
+//  honest message on the game screen instead of the app closing.
+//
+//  Nothing here changes what the player draws, how the buttons work, or which
+//  core runs a game.
+// ---------------------------------------------------------------------------
+constexpr size_t CoreStackBytes = 32u * 1024u * 1024u;   // desktop cores need it
+
+struct CoreFaultGuard {
+	jmp_buf env;
+	volatile sig_atomic_t armed = 0;
+	volatile sig_atomic_t signo = 0;
+};
+
+// One core at a time runs in this process (see g_one_core_mutex), so one
+// landing point and one alternate signal stack are enough.
+thread_local CoreFaultGuard g_fault;
+thread_local bool g_fault_stack_ready = false;
+char *g_fault_stack_mem = nullptr;
+
+const char *SignalName(int sig) {
+	switch (sig) {
+	case SIGSEGV: return "a bad memory access";
+	case SIGBUS:  return "a bus error";
+	case SIGILL:  return "an illegal instruction";
+	case SIGFPE:  return "a math fault";
+	case SIGABRT: return "an abort inside the core";
+	default:      return "a fatal signal";
+	}
+}
+
+// Runs on the alternate stack, so it also survives a stack overflow.
+void CoreFaultHandler(int sig, siginfo_t *, void *) {
+	if (g_fault.armed) {
+		g_fault.armed = 0;
+		g_fault.signo = sig;
+		// The signal is blocked while this handler runs; unblock it by hand,
+		// because a plain longjmp() does not restore the signal mask. Without
+		// this a second fault on the same thread could not be caught.
+		sigset_t only;
+		sigemptyset(&only);
+		sigaddset(&only, sig);
+		sigprocmask(SIG_UNBLOCK, &only, nullptr);
+		longjmp(g_fault.env, 1);   // never returns
+	}
+	// A fault we did not arm: behave exactly as the system would have.
+	struct sigaction sa;
+	std::memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	sigaction(sig, &sa, nullptr);
+	raise(sig);
+}
+
+void InstallCoreFaultHandlers() {
+	static std::once_flag once;
+	std::call_once(once, [] {
+		struct sigaction sa;
+		std::memset(&sa, 0, sizeof(sa));
+		sa.sa_sigaction = &CoreFaultHandler;
+		sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+		sigemptyset(&sa.sa_mask);
+		const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+		for (int sig : signals) sigaction(sig, &sa, nullptr);
+	});
+}
+
+// Prepared on the emulation thread, before it touches a core.
+void PrepareCoreFaultStack() {
+	if (g_fault_stack_ready) return;
+	if (!g_fault_stack_mem) g_fault_stack_mem = static_cast<char *>(std::malloc(64u * 1024u));
+	if (!g_fault_stack_mem) return;
+	stack_t ss;
+	std::memset(&ss, 0, sizeof(ss));
+	ss.ss_sp = g_fault_stack_mem;
+	ss.ss_size = 64u * 1024u;
+	ss.ss_flags = 0;
+	if (sigaltstack(&ss, nullptr) == 0) g_fault_stack_ready = true;
+}
 
 std::string BaseNameOf(const std::string &path) {
 	const size_t slash = path.find_last_of("/\\");
@@ -286,11 +391,19 @@ struct SphynxPlayerHandle {
 	//  frontend, including V5, keeps emulation off the UI thread; this is that
 	//  split, done with the smallest possible surface.
 	// ------------------------------------------------------------------
-	std::thread worker;
+	// SPHYNX (stage 18): a plain pthread instead of std::thread, because the
+	// stack size has to be chosen (CoreStackBytes, not the 1 MB default).
+	pthread_t worker{};
+	bool worker_valid = false;
 	std::atomic<bool> quit{false};
 	std::atomic<bool> paused{false};
 	std::atomic<bool> started{false};
 	std::atomic<bool> failed{false};
+	// SPHYNX (stage 18): set once the core has really delivered a few frames.
+	// A core that faults on its first frame is a wrong guess at what the file
+	// is, and open() uses this to move on to the next system instead of handing
+	// the user a game that dies one second after he taps it.
+	std::atomic<bool> warm{false};
 	// Serialises everything that touches the core: the frame loop and the
 	// infrequent save/load/option calls from the UI thread.
 	std::mutex session_mutex;
@@ -317,7 +430,10 @@ void StopWorker(SphynxPlayerHandle *p) {
 	if (!p) return;
 	std::lock_guard<std::mutex> lock(p->close_mutex);
 	p->quit = true;
-	if (p->worker.joinable()) p->worker.join();
+	if (p->worker_valid) {
+		pthread_join(p->worker, nullptr);
+		p->worker_valid = false;
+	}
 	p->dead = true;
 }
 
@@ -596,12 +712,82 @@ void SetStatus(SphynxPlayerHandle *p) {
 //  one emulated frame per display frame - but on a thread of its own, so a slow
 //  frame can never stall PPSSPP's interface or the audio queue.
 // ---------------------------------------------------------------------------
+// One guarded frame. The setjmp()/longjmp() pair lives entirely inside this
+// function, so no variable of the caller is live across the landing point (that
+// is also what keeps the compiler's -Wclobbered quiet). The session mutex is
+// taken and released by hand: jumping out of a lock_guard would leave it locked
+// and freeze the UI thread that also uses it.
+bool RunFrameGuarded(SphynxPlayerHandle *p, int *crash_signal) {
+	volatile sig_atomic_t caught = 0;
+	volatile bool ok = false;
+	p->session_mutex.lock();
+	g_fault.armed = 1;
+	if (setjmp(g_fault.env) == 0) {
+		ok = p->session.RunFrame();
+		g_fault.armed = 0;
+	} else {
+		caught = g_fault.signo;
+	}
+	p->session_mutex.unlock();
+	if (caught) {
+		if (crash_signal) *crash_signal = caught;
+		return false;
+	}
+	return ok;
+}
+
+// Shutdown, guarded the same way: a core that faults inside deinit() must not
+// close the app the user is still looking at.
+void StopSessionGuarded(SphynxPlayerHandle *p) {
+	p->session_mutex.lock();
+	g_fault.armed = 1;
+	if (setjmp(g_fault.env) == 0) {
+		FlushBatterySave(p);
+		p->session.Stop();
+		g_fault.armed = 0;
+	} else {
+		g_fault.armed = 0;
+		sphynx::LogLine("player: the emulator faulted while shutting down");
+		p->session.AbandonCore();
+	}
+	p->session_mutex.unlock();
+}
+
 void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string content,
                   std::string system_dir) {
 	const std::string save_dir = p->save_dir;
 
 	std::string error;
-	if (!p->session.Start(core_path, content, system_dir, save_dir, &error)) {
+	// SPHYNX (stage 18): the core is entered behind a landing point, so a core
+	// that faults while loading the game ends this attempt instead of the app.
+	PrepareCoreFaultStack();
+	InstallCoreFaultHandlers();
+	volatile sig_atomic_t crash_signal = 0;
+	volatile bool start_ok = false;
+	g_fault.armed = 1;
+	if (setjmp(g_fault.env) == 0) {
+		start_ok = p->session.Start(core_path, content, system_dir, save_dir, &error);
+		g_fault.armed = 0;
+	} else {
+		crash_signal = g_fault.signo;
+	}
+	if (crash_signal) {
+		// The crashed core is left completely alone: unload_game() and deinit()
+		// are calls back into the code that just faulted.
+		p->session.AbandonCore();
+		sphynx::LogLine(std::string("player: ") + p->system_name + " crashed while starting (" +
+		                SignalName(crash_signal) + ")");
+		{
+			std::lock_guard<std::mutex> lock(p->start_mutex);
+			p->start_error = std::string("its emulator crashed while starting (") +
+			                 SignalName(crash_signal) + ")";
+		}
+		p->failed = true;
+		p->started = true;
+		p->start_cv.notify_all();
+		return;
+	}
+	if (!start_ok) {
 		{
 			std::lock_guard<std::mutex> lock(p->start_mutex);
 			p->start_error = error.empty() ? "the emulator refused this game" : error;
@@ -683,11 +869,28 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 		const int loops = std::max(1, p->fast_forward.load(std::memory_order_relaxed));
 		for (int i = 0; i < loops && !p->quit.load(std::memory_order_relaxed); ++i) {
 			const auto t0 = Clock::now();
-			bool ok = false;
-			{
-				std::lock_guard<std::mutex> lock(p->session_mutex);
-				ok = p->session.RunFrame();
-				if (ok) ++p->frames_run;
+			// SPHYNX (stage 18): one guarded frame (see RunFrameGuarded).
+			int frame_crash = 0;
+			const bool ok = RunFrameGuarded(p, &frame_crash);
+			if (frame_crash) {
+				// The core is gone: drop it untouched and tell the screen the
+				// truth. No process death, no silent ejection.
+				p->session.AbandonCore();
+				p->error = std::string("the emulator crashed (") + SignalName(frame_crash) + ")";
+				sphynx::LogLine(std::string("player: ") + p->system_name + ": " + p->error);
+				p->failed = true;
+				p->quit = true;
+				p->start_cv.notify_all();
+				break;
+			}
+			if (ok) ++p->frames_run;
+			// A core that has produced a handful of frames is really running.
+			if (ok && !p->warm.load(std::memory_order_relaxed) && p->frames_run >= 5) {
+				{
+					std::lock_guard<std::mutex> lock(p->start_mutex);
+					p->warm = true;
+				}
+				p->start_cv.notify_all();
 			}
 			const double ms =
 				std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -699,6 +902,7 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 				sphynx::LogLine(std::string("player: stopped: ") + p->error);
 				p->failed = true;
 				p->quit = true;
+				p->start_cv.notify_all();
 				break;
 			}
 			// Battery save every 20 s, on this thread (it touches core memory).
@@ -760,12 +964,30 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 	}
 
 	// Leave cleanly: battery save first, then the core, then the audio device.
-	{
+	// SPHYNX (stage 18): even the shutdown is guarded - a core that faults
+	// inside deinit() must not close the app the user is still looking at.
+	if (p->session.IsRunning()) {
+		StopSessionGuarded(p);
+	} else if (!p->failed.load()) {
 		std::lock_guard<std::mutex> lock(p->session_mutex);
 		FlushBatterySave(p);
-		p->session.Stop();
 	}
 	if (p->audio_out) p->audio_out->Stop();
+}
+
+// SPHYNX (stage 18): what the emulation thread needs to start, owned by the
+// thread itself so a failed pthread_create() cannot leak it either.
+struct WorkerArgs {
+	SphynxPlayerHandle *handle = nullptr;
+	std::string core_path;
+	std::string content;
+	std::string system_dir;
+};
+
+void *PlayerWorkerEntry(void *raw) {
+	std::unique_ptr<WorkerArgs> args(static_cast<WorkerArgs *>(raw));
+	PlayerWorker(args->handle, args->core_path, args->content, args->system_dir);
+	return nullptr;
 }
 
 }  // namespace
@@ -844,7 +1066,8 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 
 	// One attempt: build the handle for `key` and let the core start on its own
 	// thread. Returns nullptr with a reason when the core refuses the game.
-	auto prepare = [&](const std::string &key, std::string *why) -> SphynxPlayerHandle * {
+	auto prepare = [&](const std::string &key, bool has_alternatives,
+	                   std::string *why) -> SphynxPlayerHandle * {
 		const sphynx::SystemInfo *sys = sphynx::FindSystemByKey(key.c_str());
 		if (!sys) {
 			if (why) *why = "unknown system";
@@ -941,20 +1164,49 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 		SphynxPlayerHandle *handle = p.release();
 		{
 			std::unique_lock<std::mutex> lock(handle->start_mutex);
-			handle->worker = std::thread(PlayerWorker, handle, core_path, local, system_dir);
+			// SPHYNX (stage 18): a thread with a real stack (see CoreStackBytes).
+			pthread_attr_t attr;
+			pthread_attr_init(&attr);
+			pthread_attr_setstacksize(&attr, CoreStackBytes);
+			WorkerArgs *args = new WorkerArgs{handle, core_path, local, system_dir};
+			const int created = pthread_create(&handle->worker, &attr, &PlayerWorkerEntry, args);
+			pthread_attr_destroy(&attr);
+			if (created != 0) {
+				// Nothing was started: fall through to the failure path below,
+				// which stops and frees the handle exactly once.
+				delete args;
+				handle->start_error = "the emulator thread could not be created";
+				handle->failed = true;
+				handle->started = true;
+			}
+			handle->worker_valid = true;
 			if (!handle->start_cv.wait_for(lock, std::chrono::seconds(30),
 			                               [handle] { return handle->started.load(); })) {
 				handle->start_error = "the emulator did not start within 30 seconds";
 				handle->failed = true;
+			}
+			// SPHYNX (stage 18): when another system could still play this file,
+			// give this core a moment to prove it survives its first frames. A
+			// core that dies right after loading used to be accepted (it had
+			// "started"), and the user was thrown out of the game a second later.
+			// On a timeout the core is accepted: slow is not the same as broken,
+			// and a file only one system claims never waits at all.
+			if (has_alternatives && !handle->failed.load()) {
+				handle->start_cv.wait_for(lock, std::chrono::milliseconds(800), [handle] {
+					return handle->warm.load() || handle->failed.load();
+				});
 			}
 		}
 		if (handle->failed.load()) {
 			// `handle` owns everything now: p was released above and must not be
 			// touched again (stage 17 - reading p->bios_status here crashed the
 			// whole player the first time this path was taken).
-			std::string message = handle->start_error.empty()
-			                          ? "the emulator refused this game"
-			                          : handle->start_error;
+			// SPHYNX (stage 18): a core that started and then failed (it crashed,
+			// or it stopped by itself) has no start error - its reason is in
+			// handle->error, and that is what belongs on the panel.
+			std::string message = handle->start_error;
+			if (message.empty()) message = handle->error;
+			if (message.empty()) message = "the emulator refused this game";
 			// The full text (with the dlopen path, for the log) stays here; the
 			// one line that goes on screen is shortened below.
 			const std::string full_message = message;
@@ -986,9 +1238,10 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 	//    so that a file no system can run produces a message that says why.
 	std::vector<std::pair<std::string, std::string>> tried;
 	SphynxPlayerHandle *handle = nullptr;
-	for (const std::string &key : keys) {
+	for (size_t key_index = 0; key_index < keys.size(); ++key_index) {
+		const std::string &key = keys[key_index];
 		std::string why;
-		handle = prepare(key, &why);
+		handle = prepare(key, key_index + 1 < keys.size(), &why);
 		if (handle) {
 			if (!tried.empty())
 				sphynx::LogLine("player: " + handle->system_name +
@@ -1169,7 +1422,13 @@ double sphynx_player_fps(SphynxPlayerHandle *p) {
 
 const char *sphynx_player_status(SphynxPlayerHandle *p) {
 	if (!p) return "";
-	return p->dead.load() ? "this game was closed" : p->status.c_str();
+	if (p->dead.load()) return "this game was closed";
+	// SPHYNX (stage 18): a handle that stopped because the core failed answers
+	// with the reason itself. The failure panel used to print the "system ·
+	// 320x240 · 60 fps" summary here, so the cause - a crash, a refused file -
+	// never reached the screen and the game simply ended with no explanation.
+	if (p->failed.load() && !p->error.empty()) return p->error.c_str();
+	return p->status.c_str();
 }
 
 const char *sphynx_player_system_name(SphynxPlayerHandle *p) {

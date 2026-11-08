@@ -91,7 +91,23 @@ void retro_set_controller_port_device(unsigned port, unsigned device) {
 
 void retro_reset(void) { frame_counter = 0; }
 
+/* Test hook (stage 18): a real fault at a chosen point, so the host's crash
+ * containment is tested with an actual SIGSEGV instead of a simulated answer.
+ *   SPHYNX_STUB_CRASH_ON_LOAD=1  -> faults inside retro_load_game()
+ *   SPHYNX_STUB_CRASH_AFTER=<n>  -> faults on frame n+1 of retro_run()
+ * Writing through a null pointer cannot be optimised away and is exactly what a
+ * desktop core does when it is handed content it does not understand. */
+static void stub_crash_now(void) {
+	volatile unsigned *nowhere = (volatile unsigned *)0;
+	*nowhere = 0x1234u;
+}
+
 void retro_run(void) {
+	{
+		const char *crash = getenv("SPHYNX_STUB_CRASH_AFTER");
+		if (crash && *crash && frame_counter >= (uint32_t)atoi(crash)) stub_crash_now();
+	}
+
 	/* Test hook: SPHYNX_STUB_DELAY_MS makes one frame take a known amount of
 	 * time so the host watchdog can be tested deterministically. */
 	const char *delay = getenv("SPHYNX_STUB_DELAY_MS");
@@ -166,6 +182,10 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code) {
 }
 
 bool retro_load_game(const struct retro_game_info *game) {
+	{
+		const char *crash = getenv("SPHYNX_STUB_CRASH_ON_LOAD");
+		if (crash && *crash && atoi(crash) != 0) stub_crash_now();
+	}
 	if (env_cb) {
 		enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
 		if (!env_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) return false;

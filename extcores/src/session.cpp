@@ -184,6 +184,22 @@ bool Session::RunFrame() {
 	return true;
 }
 
+void Session::AbandonCore() {
+	// SPHYNX (stage 18): a core that has just faulted is dropped untouched.
+	// Everything below is bookkeeping in *this* process; nothing calls into the
+	// crashed library again, so a bad pointer inside it cannot fault twice.
+	running_ = false;
+	last_run_failed_ = true;
+	if (error_.empty()) error_ = "the emulator crashed";
+	audio_stage_.clear();
+	loader_.ForgetWithoutClosing();
+	tls_session = nullptr;
+	tls_frame = nullptr;
+	tls_audio = nullptr;
+	tls_input = nullptr;
+	tls_env = nullptr;
+}
+
 void Session::Stop() {
 	if (!running_) {
 		if (loader_.IsOpen()) loader_.Close();

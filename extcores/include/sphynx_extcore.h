@@ -191,6 +191,10 @@ public:
 	// when the library is missing or does not expose the full API.
 	bool Open(const std::string &library_path);
 	void Close();
+	// SPHYNX (stage 18): drop the library *without* dlclose(). Used only after
+	// the core has faulted: running its destructors is another call into broken
+	// code, so the mapping is left to the end of the process instead.
+	void ForgetWithoutClosing();
 	bool IsOpen() const { return handle_ != nullptr; }
 
 	const char *LastError() const { return error_.c_str(); }
@@ -346,6 +350,10 @@ public:
 	// Stop() calls it so the last fraction of a frame is not lost.
 	void FlushAudioStage();
 	void Stop();
+	// SPHYNX (stage 18): the core faulted. Nothing else is ever called on it -
+	// unload_game() and deinit() would run the code that just crashed - and the
+	// session is left in a stopped state that the player can report honestly.
+	void AbandonCore();
 	bool IsRunning() const { return running_; }
 
 	// Save states go through the core, never through PPSSPP's PSP savestates.

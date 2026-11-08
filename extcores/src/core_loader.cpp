@@ -127,6 +127,16 @@ bool CoreLoader::Open(const std::string &library_path) {
 	return true;
 }
 
+void CoreLoader::ForgetWithoutClosing() {
+	// The symbol table itself is plain data; only dlclose() is skipped.
+	if (sym) {
+		delete sym;
+		sym = nullptr;
+	}
+	handle_ = nullptr;
+	api_version_ = 0;
+}
+
 void CoreLoader::Close() {
 	if (sym) {
 		delete sym;
