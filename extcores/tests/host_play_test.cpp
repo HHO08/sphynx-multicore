@@ -603,6 +603,53 @@ void TestHardwareRender(const std::string &stub_core, const std::string &sys, co
 	unsetenv("SPHYNX_STUB_HW");
 }
 
+// Stage 19 fix: some cores (mupen64plus_next for the N64) read the game
+// strictly from the bytes in retro_game_info.data. The frontend used to pass
+// the path only, so a perfectly good file was refused with "failed to load
+// ROM". These checks pin the contract: the bytes arrive, they are refused
+// when they cannot be right, and content that is a directory (ScummVM,
+// DOSBox) still reaches the core as a path.
+void TestContentBytes(const std::string &stub_core, const std::string &sys, const std::string &save) {
+	std::printf("\n[9] the game reaches the core as bytes\n");
+	// A cartridge-sized file with a known marker at offset 0.
+	const std::string rom = g_root + "/bytes-test.sfc";
+	{
+		std::string bytes = "SPHYNX-ROM-19";
+		bytes.resize(64 * 1024, 'B');
+		WriteFile(rom, bytes);
+	}
+	setenv("SPHYNX_STUB_NEEDS_DATA", "1", 1);
+	{
+		sphynx::Session session;
+		std::string err;
+		Check(session.Start(stub_core, rom, sys, save, &err),
+		      std::string("a data-hungry core gets the file's bytes: ") + err);
+		session.Stop();
+	}
+	// The same core with a buffer that cannot be right: it has to refuse, so
+	// the check above cannot pass just because a buffer happens to exist.
+	const std::string small = g_root + "/bytes-small.sfc";
+	WriteFile(small, "SPHYNX-ROM-19");
+	{
+		sphynx::Session session;
+		std::string err;
+		Check(!session.Start(stub_core, small, sys, save, &err),
+		      "a wrong buffer is still refused by the data-hungry core");
+	}
+	unsetenv("SPHYNX_STUB_NEEDS_DATA");
+	// Directory content cannot be read into memory; the path-only handover
+	// that DOSBox and ScummVM live on keeps working.
+	{
+		const std::string dir = g_root + "/game-dir";
+		MkDirs(dir);
+		sphynx::Session session;
+		std::string err;
+		Check(session.Start(stub_core, dir, sys, save, &err),
+		      std::string("a directory as content still opens (path-only): ") + err);
+		session.Stop();
+	}
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) {
 		std::printf("usage: %s /path/to/libstub_core.so\n", argv[0]);
@@ -625,6 +672,7 @@ int main(int argc, char **argv) {
 	TestRefusalFallback(stub_core, g_root + "/sys", g_root + "/save");
 	TestCrashIsContained(stub_core, g_root + "/sys", g_root + "/save");
 	TestHardwareRender(stub_core, g_root + "/sys", g_root + "/save");
+	TestContentBytes(stub_core, g_root + "/sys", g_root + "/save");
 
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");

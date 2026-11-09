@@ -17,12 +17,19 @@
 #include "core_symbols.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 
 namespace sphynx {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// SPHYNX (stage 19 fix): content at or below this size is handed to the core
+// as in-memory bytes. 128 MiB covers every cartridge system that exists; the
+// bigger files (disc images, the largest DS cards) stay path-only, which is
+// the form their cores read anyway.
+constexpr size_t kMaxInMemoryContent = 128u * 1024 * 1024;
 
 double MsSince(Clock::time_point t0) {
 	const auto d = Clock::now() - t0;
@@ -121,11 +128,41 @@ bool Session::Start(const std::string &core_path, const std::string &content_pat
 	loader_.sym->init();
 
 	// 3. load content. A core that needs a full path (DOSBox, ScummVM, Flycast)
-	//    asks for it through the environment; we always pass both.
+	//    asks for it through the environment; we always pass the path, and
+	//    SPHYNX (stage 19 fix) the file's bytes as well.
+	//
+	//    The bytes are the fix for the N64 refusal: mupen64plus_next reads the
+	//    game strictly from info.data/size (M64CMD_ROM_OPEN asserts below
+	//    4 KiB) and never opens info.path, so the path-only handover failed a
+	//    perfectly good file with "failed to load ROM". Real frontends hand
+	//    over both. The buffer lives in the session, because a core is allowed
+	//    to keep info.data for the whole run.
+	//
+	//    Unreadable, empty, oversized, or directory content keeps the old
+	//    path-only form: fopen() succeeds on a directory but fread() fails,
+	//    and every failure just clears the buffer below.
+	content_data_.clear();
+	{
+		std::FILE *f = std::fopen(content_.c_str(), "rb");
+		if (f) {
+			if (std::fseek(f, 0, SEEK_END) == 0) {
+				const long len = std::ftell(f);
+				if (len > 0 && static_cast<size_t>(len) <= kMaxInMemoryContent) {
+					content_data_.resize(static_cast<size_t>(len));
+					std::fseek(f, 0, SEEK_SET);
+					if (std::fread(content_data_.data(), 1, content_data_.size(), f)
+					    != content_data_.size())
+						content_data_.clear();  // partial read: path-only, like before
+				}
+			}
+			std::fclose(f);
+		}
+	}
+
 	retro_game_info info{};
 	info.path = content_.c_str();
-	info.data = nullptr;
-	info.size = 0;
+	info.data = content_data_.empty() ? nullptr : content_data_.data();
+	info.size = content_data_.size();
 	info.meta = nullptr;
 
 	if (!loader_.sym->load_game(&info)) {

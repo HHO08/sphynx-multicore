@@ -444,6 +444,9 @@ private:
 	InputSource input_;
 	SessionStats stats_;
 	std::string system_dir_, save_dir_, content_;
+	// SPHYNX (stage 19 fix): the game's bytes handed over as retro_game_info.
+	// A member, not a local: cores may keep info.data alive for the session.
+	std::vector<uint8_t> content_data_;
 	std::string error_;
 	bool running_ = false;
 	bool last_run_failed_ = false;

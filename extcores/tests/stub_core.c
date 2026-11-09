@@ -235,6 +235,19 @@ bool retro_load_game(const struct retro_game_info *game) {
 		const char *hw = getenv("SPHYNX_STUB_HW");
 		hw_mode = (hw && *hw && atoi(hw) != 0);
 	}
+	{
+		/* Test hook (stage 19 fix): SPHYNX_STUB_NEEDS_DATA=1 reproduces the
+		 * mupen64plus_next contract - the game must arrive as bytes in
+		 * info->data (at least 4 KiB, like M64CMD_ROM_OPEN demands) and the
+		 * marker proves these are really the file's bytes. A frontend that
+		 * passes the path alone is refused, exactly like the real core. */
+		const char *needs = getenv("SPHYNX_STUB_NEEDS_DATA");
+		if (needs && *needs && atoi(needs) != 0) {
+			if (!game || !game->data || game->size < 4096 ||
+			    memcmp(game->data, "SPHYNX-ROM", 10) != 0)
+				return false;
+		}
+	}
 	if (hw_mode) {
 		/* Ask for a GLES2 context exactly like the real hardware cores do. */
 		struct retro_hw_render_callback hw;
