@@ -248,7 +248,7 @@ jobs:
           done
           # Stage 15: the recommendation table really is compiled in (the DS
           # white-screen fix lives there), and the stale-open repair is present.
-          for text in melonds_renderer mupen64plus-Resolution self-repair; do
+          for text in melonds_renderer mupen64plus-EnableNativeResFactor self-repair; do
             unzip -p "$TARGET" lib/armeabi-v7a/libsphynx_extcore.so | strings | grep -q "$text" \
               || { echo "::error::missing stage-15 text $text in libsphynx_extcore.so"; exit 1; }
           done
