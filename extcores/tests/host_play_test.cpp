@@ -588,7 +588,63 @@ void TestHardwareRender(const std::string &stub_core, const std::string &sys, co
 			      std::to_string(last[2]));
 			Check(first[3] == 255, "and every pixel is opaque");
 		}
+
+		// SPHYNX (stage 20): the display-quality setting. It is the first row
+		// in Core Settings for this system, it refuses words it does not know,
+		// and the level the user picks lands on the resolution option the
+		// core itself declared - while the game is running.
+		{
+			const char *line = sphynx_player_option(player, 0);
+			Check(line && std::strncmp(line, "sphynx-quality|", 15) == 0,
+			      "the first Core Settings row is the display quality");
+			Check(sphynx_player_set_option(player, "sphynx-quality", "ultra") == 0,
+			      "a quality word that does not exist is refused");
+			Check(sphynx_player_set_option(player, "sphynx-quality", "high") == 1,
+			      "the quality setting is accepted while the game runs");
+			line = sphynx_player_option(player, 0);
+			Check(line && std::strstr(line, "|high|") != nullptr,
+			      "and the row shows the level that was chosen");
+			// The core's own option, as the core will now receive it.
+			std::string resolved;
+			const int count = sphynx_player_option_count(player);
+			for (int i = 1; i < count; ++i) {
+				const char *row = sphynx_player_option(player, i);
+				if (row && std::strncmp(row, "mupen64plus-EnableNativeResFactor|", 34) == 0) {
+					resolved = row;
+					break;
+				}
+			}
+			Check(!resolved.empty() && resolved.find("|4|") != std::string::npos,
+			      "and the core's resolution factor really moved to high (4)");
+		}
 		sphynx_player_close(player);
+
+		// The chosen level outlives the game: on the next start the stored
+		// quality is resolved onto the core's option again, before the core
+		// has read a single variable.
+		{
+			SphynxPlayerHandle *again = sphynx_player_open(n64.c_str(), nullptr, err, sizeof(err));
+			Check(again != nullptr, std::string("the game starts again: ") + err);
+			if (again) {
+				const char *line = sphynx_player_option(again, 0);
+				Check(line && std::strstr(line, "|high|") != nullptr,
+				      "the quality choice is remembered on the next start");
+				Check(sphynx_player_set_option(again, "sphynx-quality", "fast") == 1,
+				      "and it can be changed again");
+				std::string resolved;
+				const int count = sphynx_player_option_count(again);
+				for (int i = 1; i < count; ++i) {
+					const char *row = sphynx_player_option(again, i);
+					if (row && std::strncmp(row, "mupen64plus-EnableNativeResFactor|", 34) == 0) {
+						resolved = row;
+						break;
+					}
+				}
+				Check(!resolved.empty() && resolved.find("|1|") != std::string::npos,
+				      "and fast is the native factor (1)");
+				sphynx_player_close(again);
+			}
+		}
 	}
 
 	// The same core, now asked for a system that does not exist: the refusal

@@ -529,6 +529,10 @@ struct SphynxPlayerHandle {
 	// One flattened option line, reused so sphynx_player_option() can return a
 	// const char* without allocating (see sphynx_player_api.h).
 	std::string option_line_cache;
+	// SPHYNX (stage 20): the display-quality setting, one of auto/high/
+	// balanced/fast, and the resolution value it resolved to for this start.
+	std::string quality = "auto";
+	std::string quality_resolved;
 };
 
 namespace {
@@ -780,7 +784,11 @@ std::vector<std::pair<std::string, std::string>> LoadOptions(const std::string &
 	return out;
 }
 
-void SaveOptions(const std::string &path, const std::vector<sphynx::CoreOption> &options) {
+// SPHYNX (stage 20): the display-quality setting lives in the same file. It is
+// a player-side setting, not a core option, so it is written as one extra
+// line; an empty `quality` leaves the file without it (the default is auto).
+void SaveOptions(const std::string &path, const std::vector<sphynx::CoreOption> &options,
+                 const std::string &quality = std::string()) {
 	if (path.empty()) return;
 	const size_t slash = path.find_last_of('/');
 	if (slash != std::string::npos) EnsureDirectoryExists(path.substr(0, slash));
@@ -788,7 +796,91 @@ void SaveOptions(const std::string &path, const std::vector<sphynx::CoreOption> 
 	if (!f) return;
 	for (const auto &option : options)
 		fprintf(f, "%s=%s\n", option.key.c_str(), option.current.c_str());
+	if (!quality.empty()) fprintf(f, "sphynx-quality=%s\n", quality.c_str());
 	fclose(f);
+}
+
+// ---------------------------------------------------------------------------
+//  SPHYNX (stage 20): display quality. One setting in Core Settings for the
+//  systems whose core can render above the console's own resolution (N64,
+//  Dreamcast). Default "auto": balanced on a strong device, native on a
+//  modest one; any level the user picks wins. The setting is resolved onto
+//  the one core option that really owns the resolution, so the core is never
+//  told about anything it did not declare.
+// ---------------------------------------------------------------------------
+
+// The device this runs on, as the quality decision needs to see it. sysconf()
+// works the same on Android and on the desktop test host.
+sphynx::DeviceProfile ThisDeviceProfile() {
+	sphynx::DeviceProfile profile{2000, 4};   // a modest floor, not a guess upward
+	const long pages = sysconf(_SC_PHYS_PAGES);
+	const long page = sysconf(_SC_PAGESIZE);
+	const long cores = sysconf(_SC_NPROCESSORS_CONF);
+	if (pages > 0 && page > 0)
+		profile.ram_mb = static_cast<int>((static_cast<long long>(pages) * page) / (1024 * 1024));
+	if (cores > 0) profile.cpu_cores = static_cast<int>(cores);
+	return profile;
+}
+
+// The stored quality for this system ("auto" when nothing was stored or the
+// stored word is not one of the four).
+std::string QualityFromStored(const std::vector<std::pair<std::string, std::string>> &stored) {
+	for (const auto &kv : stored)
+		if (kv.first == "sphynx-quality" && sphynx::IsValidQuality(kv.second)) return kv.second;
+	return "auto";
+}
+
+// The concrete resolution value a level means at start time, before the core
+// has declared its value list. These are exactly the values the shipped cores
+// declare (GLideN64's "0".."8", flycast's "1x".."8x"); the live path validates
+// against whatever the running core really offers, so a different core
+// version simply fails open to the recommendation engine.
+std::string QualityStartValue(const std::string &level, const std::string &core_tag) {
+	if (core_tag == "mupen64plus_next_gles2") {
+		if (level == "fast") return "1";
+		if (level == "balanced") return "2";
+		if (level == "high") return "4";
+	} else if (core_tag == "flycast") {
+		if (level == "fast") return "1x";
+		if (level == "balanced") return "2x";
+		if (level == "high") return "4x";
+	}
+	return std::string();
+}
+
+// Resolves the setting onto the core's resolution option. A chosen level wins
+// over everything; "auto" steps up only where the device can afford it, and
+// never touches a resolution the user picked by hand (a stored value that
+// differs from the engine's own baseline is a user's choice, because the
+// engine only ever writes the baseline itself).
+void ApplyQuality(std::vector<std::pair<std::string, std::string>> *initial,
+                  const std::string &core_tag, const std::string &quality,
+                  const sphynx::DeviceProfile &profile, std::string *resolved_out) {
+	const std::string key = sphynx::QualityResolutionKey(core_tag);
+	if (key.empty() || !initial) return;
+	const std::string baseline = sphynx::QualityAutoBaseline(core_tag);
+	std::string stored;
+	for (const auto &kv : *initial)
+		if (kv.first == key) stored = kv.second;
+	const bool user_chose = !stored.empty() && !baseline.empty() && stored != baseline;
+	std::string level = quality;
+	if (level == "auto") level = sphynx::StrongDevice(profile) ? "balanced" : "fast";
+	if (user_chose && level == "fast") return;   // native is also the user's value's floor
+	const std::string resolved = QualityStartValue(level, core_tag);
+	if (resolved.empty() || resolved == stored) return;
+	if (resolved == baseline && stored.empty() && !user_chose) return;   // the engine's pick already
+	// Replace or append: these options are applied before the core starts
+	// (stage 15), and a key present in the initial list wins over the
+	// recommendation engine.
+	bool replaced = false;
+	for (auto &kv : *initial) {
+		if (kv.first == key) {
+			kv.second = resolved;
+			replaced = true;
+		}
+	}
+	if (!replaced) initial->emplace_back(key, resolved);
+	if (resolved_out) *resolved_out = resolved;
 }
 
 // "key|label|current|v1;v2;v3" — see sphynx_player_api.h for the shape.
@@ -823,6 +915,11 @@ void SetStatus(SphynxPlayerHandle *p) {
 //  one emulated frame per display frame - but on a thread of its own, so a slow
 //  frame can never stall PPSSPP's interface or the audio queue.
 // ---------------------------------------------------------------------------
+// Declared before their users: the guarded frame calls the read-back, and the
+// guarded destroy is used from the worker and from shutdown.
+void ReadHardwareFrame(SphynxPlayerHandle *p);
+void GuardedHwDestroy(SphynxPlayerHandle *p);
+
 // One guarded frame. The setjmp()/longjmp() pair lives entirely inside this
 // function, so no variable of the caller is live across the landing point (that
 // is also what keeps the compiler's -Wclobbered quiet). The session mutex is
@@ -835,6 +932,13 @@ bool RunFrameGuarded(SphynxPlayerHandle *p, int *crash_signal) {
 	g_fault.armed = 1;
 	if (setjmp(g_fault.env) == 0) {
 		ok = p->session.RunFrame();
+		// SPHYNX (stage 20 fix): the hardware read-back used to happen after
+		// this window - glReadPixels() touching the driver with no landing
+		// point. A driver that faults there did not get contained, it killed
+		// the process and the user was thrown out of the app. It now runs
+		// inside the same armed window as retro_run(), so a GL fault on a
+		// phone ends as an honest message like any core fault.
+		if (ok) ReadHardwareFrame(p);
 		g_fault.armed = 0;
 	} else {
 		caught = g_fault.signo;
@@ -845,6 +949,37 @@ bool RunFrameGuarded(SphynxPlayerHandle *p, int *crash_signal) {
 		return false;
 	}
 	return ok;
+}
+
+// SPHYNX (stage 19): a hardware core leaves its picture in the framebuffer
+// instead of returning pixels, so it is fetched here - on the core's thread,
+// with the core's context current - and handed to the same frame queue the
+// software cores fill. Called inside RunFrameGuarded's armed window.
+void ReadHardwareFrame(SphynxPlayerHandle *p) {
+	int hw_w = 0, hw_h = 0;
+	if (p->hw && p->frame.TakeHardwareFrame(&hw_w, &hw_h)) {
+		if (p->hw->ReadFrame(static_cast<unsigned>(hw_w), static_cast<unsigned>(hw_h),
+		                     &p->hw_frame)) {
+			p->frame.HardwareFrameReady(p->hw_frame.data(), hw_w, hw_h);
+		}
+	}
+}
+
+// SPHYNX (stage 20 fix): tearing the EGL context down after a GL fault means
+// talking to a driver that just crashed. That destroy is guarded on its own:
+// if the driver faults even here, the renderer is dropped without being
+// touched again (the few handles leak inside this process, nothing else), and
+// the app - the thing the user is looking at - survives.
+void GuardedHwDestroy(SphynxPlayerHandle *p) {
+	if (!p->hw) return;
+	g_fault.armed = 1;
+	if (setjmp(g_fault.env) == 0) {
+		p->hw->Destroy();
+		g_fault.armed = 0;
+	} else {
+		g_fault.armed = 0;
+		p->hw.release();   // leak it: a crashed driver must not be asked again
+	}
 }
 
 // Shutdown, guarded the same way: a core that faults inside deinit() must not
@@ -890,7 +1025,7 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 		// The crashed core is left completely alone: unload_game() and deinit()
 		// are calls back into the code that just faulted.
 		p->session.AbandonCore();
-		if (p->hw) p->hw->Destroy();
+		GuardedHwDestroy(p);
 		sphynx::LogLine(std::string("player: ") + p->system_name + " crashed while starting (" +
 		                SignalName(crash_signal) + ")");
 		{
@@ -992,7 +1127,7 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 				// The core is gone: drop it untouched and tell the screen the
 				// truth. No process death, no silent ejection.
 				p->session.AbandonCore();
-				if (p->hw) p->hw->Destroy();
+				GuardedHwDestroy(p);
 				p->error = std::string("the emulator crashed (") + SignalName(frame_crash) + ")";
 				sphynx::LogLine(std::string("player: ") + p->system_name + ": " + p->error);
 				p->failed = true;
@@ -1001,19 +1136,9 @@ void PlayerWorker(SphynxPlayerHandle *p, std::string core_path, std::string cont
 				break;
 			}
 			if (ok) ++p->frames_run;
-			// SPHYNX (stage 19): a hardware core leaves its picture in the
-			// framebuffer instead of returning pixels, so it is fetched here -
-			// on the core's thread, with the core's context current - and handed
-			// to the same frame queue the software cores fill.
-			{
-				int hw_w = 0, hw_h = 0;
-				if (p->hw && p->frame.TakeHardwareFrame(&hw_w, &hw_h)) {
-					if (p->hw->ReadFrame(static_cast<unsigned>(hw_w), static_cast<unsigned>(hw_h),
-					                     &p->hw_frame)) {
-						p->frame.HardwareFrameReady(p->hw_frame.data(), hw_w, hw_h);
-					}
-				}
-			}
+			// (The hardware picture is read back inside RunFrameGuarded itself
+			// since the stage 20 fix - a GL driver fault there used to fall
+			// outside every landing point and close the whole app.)
 			// A core that has produced a handful of frames is really running.
 			if (ok && !p->warm.load(std::memory_order_relaxed) && p->frames_run >= 5) {
 				{
@@ -1282,7 +1407,20 @@ SphynxPlayerHandle *sphynx_player_open(const char *path, const char *system_key,
 		p->session.SetWatchdogMs(0);
 
 		// The user's own values first, then the recommended ones (stage 15).
-		p->session.EnvMutable().SetInitialOptions(LoadOptions(OptionsFilePath(p.get())));
+		{
+			std::vector<std::pair<std::string, std::string>> stored =
+				LoadOptions(OptionsFilePath(p.get()));
+			// SPHYNX (stage 20): resolve the display-quality setting onto the
+			// one option that owns the resolution, before the core starts.
+			p->quality = QualityFromStored(stored);
+			ApplyQuality(&stored, p->core_tag, p->quality, ThisDeviceProfile(),
+			             &p->quality_resolved);
+			if (!p->quality_resolved.empty())
+				sphynx::Logf("player: display quality %s -> %s=%s", p->quality.c_str(),
+				             sphynx::QualityResolutionKey(p->core_tag).c_str(),
+				             p->quality_resolved.c_str());
+			p->session.EnvMutable().SetInitialOptions(stored);
+		}
 		p->session.EnvMutable().SetRecommendations(p->core_tag);
 
 		// 5. Battery save path: the worker writes it while it runs.
@@ -1579,17 +1717,59 @@ const char *sphynx_player_bios_status(SphynxPlayerHandle *p) {
 	return p ? p->bios_status.c_str() : "";
 }
 
+// SPHYNX (stage 20): the systems whose core has a real resolution knob also
+// get the display-quality setting, shown as the first entry in Core Settings.
+bool HasQualitySetting(const SphynxPlayerHandle *p) {
+	return !sphynx::QualityResolutionKey(p->core_tag).empty();
+}
+
+sphynx::CoreOption QualityOption(const SphynxPlayerHandle *p) {
+	sphynx::CoreOption option;
+	option.key = "sphynx-quality";
+	option.label = "Display quality (auto = best for this device)";
+	option.current = p->quality;
+	option.values = {"auto", "high", "balanced", "fast"};
+	return option;
+}
+
+// Applies the setting to the running core right away, through the resolution
+// option the core itself declared. Values are checked against that option's
+// own list, so a core that offers nothing matching is simply left alone.
+void LiveApplyQuality(SphynxPlayerHandle *p) {
+	const std::string key = sphynx::QualityResolutionKey(p->core_tag);
+	if (key.empty()) return;
+	for (const sphynx::CoreOption &option : p->session.Env().Options()) {
+		if (option.key != key) continue;
+		std::string why;
+		const std::string resolved = sphynx::QualityPick(p->quality, p->core_tag, option.values,
+		                                                 ThisDeviceProfile(), &why);
+		if (!resolved.empty()) {
+			p->session.EnvMutable().SetOption(key, resolved);
+			sphynx::LogLine("player: display quality " + p->quality + " -> " + key + "=" +
+			                resolved + (why.empty() ? "" : " (" + why + ")"));
+		}
+		return;
+	}
+}
+
 int sphynx_player_option_count(SphynxPlayerHandle *p) {
 	if (!p || p->dead.load()) return 0;
-	return static_cast<int>(p->session.Env().Options().size());
+	return static_cast<int>(p->session.Env().Options().size()) +
+	       (HasQualitySetting(p) ? 1 : 0);
 }
 
 const char *sphynx_player_option(SphynxPlayerHandle *p, int index) {
 	if (!p) return nullptr;
 	if (p->dead.load()) return nullptr;
+	const bool quality_first = HasQualitySetting(p);
+	if (quality_first && index == 0) {
+		p->option_line_cache = FlattenOption(QualityOption(p));
+		return p->option_line_cache.c_str();
+	}
 	const auto &options = p->session.Env().Options();
-	if (index < 0 || index >= static_cast<int>(options.size())) return nullptr;
-	p->option_line_cache = FlattenOption(options[static_cast<size_t>(index)]);
+	const int shifted = quality_first ? index - 1 : index;
+	if (shifted < 0 || shifted >= static_cast<int>(options.size())) return nullptr;
+	p->option_line_cache = FlattenOption(options[static_cast<size_t>(shifted)]);
 	return p->option_line_cache.c_str();
 }
 
@@ -1598,8 +1778,18 @@ int sphynx_player_set_option(SphynxPlayerHandle *p, const char *key, const char 
 	// Serialised with the emulation thread: core memory is not re-entrant.
 	std::lock_guard<std::mutex> lock(p->session_mutex);
 	if (!key || !value) return 0;
+	// SPHYNX (stage 20): the display-quality setting is the player's own, not
+	// the core's: it is stored with this system's options and resolved onto
+	// the resolution option the core declared.
+	if (std::strcmp(key, "sphynx-quality") == 0) {
+		if (!sphynx::IsValidQuality(value)) return 0;
+		p->quality = value;
+		LiveApplyQuality(p);
+		SaveOptions(OptionsFilePath(p), p->session.Env().Options(), p->quality);
+		return 1;
+	}
 	if (!p->session.EnvMutable().SetOption(key, value)) return 0;
-	SaveOptions(OptionsFilePath(p), p->session.Env().Options());
+	SaveOptions(OptionsFilePath(p), p->session.Env().Options(), p->quality);
 	return 1;
 }
 

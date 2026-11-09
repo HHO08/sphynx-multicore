@@ -226,6 +226,61 @@ void TestApplyToVector() {
 	Check(sphynx::ApplyRecommendedDefaults("melonds", nullptr) == 0, "a null list is answered, not crashed on");
 }
 
+// ---------------------------------------------------------------------------
+//  5. The display-quality setting (stage 20)
+// ---------------------------------------------------------------------------
+void TestDisplayQuality() {
+	std::printf("\n[DisplayQuality]\n");
+	const sphynx::DeviceProfile modest{3000, 6};
+	const sphynx::DeviceProfile strong{6000, 8};
+
+	Check(sphynx::StrongDevice(strong) && !sphynx::StrongDevice(modest),
+	      "8 cores and 4 GiB is the strong-device line");
+	Check(sphynx::IsValidQuality("auto") && sphynx::IsValidQuality("high") &&
+	          sphynx::IsValidQuality("balanced") && sphynx::IsValidQuality("fast") &&
+	          !sphynx::IsValidQuality("ultra"),
+	      "the four quality words and nothing else are valid");
+
+	Check(sphynx::QualityResolutionKey("mupen64plus_next_gles2") == "mupen64plus-EnableNativeResFactor",
+	      "N64 quality lands on GLideN64's resolution factor");
+	Check(sphynx::QualityResolutionKey("flycast") == "reicast_internal_resolution",
+	      "Dreamcast quality lands on the internal resolution option");
+	Check(sphynx::QualityResolutionKey("gambatte").empty(),
+	      "a system without a resolution knob gets no quality mapping");
+
+	const std::vector<std::string> n64 = {"0", "1", "2", "3", "4", "5", "6", "7", "8"};
+	const std::vector<std::string> dc = {"1x", "2x", "4x", "8x"};
+
+	Check(sphynx::QualityPick("fast", "mupen64plus_next_gles2", n64, strong, nullptr) == "1",
+	      "N64 fast is the native factor");
+	Check(sphynx::QualityPick("balanced", "mupen64plus_next_gles2", n64, modest, nullptr) == "2",
+	      "N64 balanced is one step above native");
+	Check(sphynx::QualityPick("high", "mupen64plus_next_gles2", n64, strong, nullptr) == "4",
+	      "N64 high is four times the native pixels");
+	Check(sphynx::QualityPick("auto", "mupen64plus_next_gles2", n64, modest, nullptr) == "1",
+	      "N64 auto on a modest device stays native");
+	Check(sphynx::QualityPick("auto", "mupen64plus_next_gles2", n64, strong, nullptr) == "2",
+	      "N64 auto on a strong device steps up");
+	Check(sphynx::QualityPick("", "mupen64plus_next_gles2", n64, strong, nullptr) == "2",
+	      "an empty stored setting behaves like auto");
+
+	Check(sphynx::QualityPick("fast", "flycast", dc, modest, nullptr) == "1x",
+	      "Dreamcast fast is native");
+	Check(sphynx::QualityPick("balanced", "flycast", dc, modest, nullptr) == "2x",
+	      "Dreamcast balanced doubles the resolution");
+	Check(sphynx::QualityPick("high", "flycast", dc, strong, nullptr) == "4x",
+	      "Dreamcast high is 4x");
+	Check(sphynx::QualityPick("auto", "flycast", dc, strong, nullptr) == "2x",
+	      "Dreamcast auto on a strong device doubles");
+	Check(sphynx::QualityPick("high", "gambatte", {"enabled", "disabled"}, strong, nullptr).empty(),
+	      "a system without the knob resolves to nothing");
+	Check(sphynx::QualityPick("high", "mupen64plus_next_gles2", {"enabled", "disabled"}, strong, nullptr)
+	          .empty(),
+	      "a core that offers no sizes is left alone (fail-open)");
+	Check(sphynx::QualityPick("high", "mupen64plus_next_gles2", {"0", "1"}, strong, nullptr) == "1",
+	      "a short list tops out at its biggest step instead of failing");
+}
+
 }  // namespace
 
 int main() {
@@ -234,6 +289,7 @@ int main() {
 	TestGenericRules();
 	TestThroughTheEnvironment();
 	TestApplyToVector();
+	TestDisplayQuality();
 	std::printf("\n%d checks, %d failure(s) — %s\n", g_checks, g_failures,
 	            g_failures ? "FAILED" : "all good");
 	return g_failures ? 1 : 0;

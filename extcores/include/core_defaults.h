@@ -44,6 +44,41 @@ std::string RecommendOptionValue(const std::string &core_tag, const std::string 
 // Returns how many options were changed; the reasons are logged by the caller.
 int ApplyRecommendedDefaults(const std::string &core_tag, std::vector<CoreOption> *options);
 
+// ---------------------------------------------------------------------------
+//  SPHYNX (stage 20): display quality for the cores that can render above
+//  their console's own resolution (Nintendo 64, Dreamcast). One setting in
+//  Core Settings ("sphynx-quality"), default "auto": the value is chosen for
+//  this device (a strong phone steps up, a modest one keeps full speed at the
+//  native resolution), and any level the user picks wins over it.
+// ---------------------------------------------------------------------------
+struct DeviceProfile {
+	int ram_mb;      // physical memory, rounded down to MiB
+	int cpu_cores;   // cores the kernel reports
+};
+
+// A device that can afford rendering above the console's native resolution
+// without trading frames away. Deliberately conservative: 8 cores and 4 GiB.
+bool StrongDevice(DeviceProfile profile);
+
+// The quality words the setting accepts. "auto" is the default.
+bool IsValidQuality(const std::string &quality);
+
+// The core option key this setting drives for a system, or "" when the system
+// has no real resolution knob (everything but N64 and Dreamcast stays native).
+std::string QualityResolutionKey(const std::string &core_tag);
+
+// The value the auto/baseline resolution recommendation produces for a system
+// ("1" for N64, "1x" for Dreamcast), so a value the user chose by hand can be
+// told apart from one the engine wrote.
+std::string QualityAutoBaseline(const std::string &core_tag);
+
+// Resolves a quality level to a concrete value of the core's resolution
+// option, chosen from the values the core itself offers (fail-open: a level
+// that maps to nothing this core offers returns ""). `why` gets one line.
+std::string QualityPick(const std::string &quality, const std::string &core_tag,
+                        const std::vector<std::string> &values, DeviceProfile profile,
+                        std::string *why);
+
 // One line per recommendation that exists for `core_tag`, for the log and for
 // the player's diagnostic panel: "melonds_renderer = software (software...)".
 // Empty when this core has no recommendation.

@@ -67,12 +67,25 @@ void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { batch_cb = cb
 void retro_set_input_poll(retro_input_poll_t cb) { poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { state_cb = cb; }
 
+/* SPHYNX (stage 20): the stub declares the one option the display-quality
+ * setting drives on the real N64 core (GLideN64's "Native Resolution
+ * Factor"). With it, the play test can verify the whole chain - stored
+ * setting -> resolution value applied before the core starts -> live change
+ * while running - through the real environment machinery. */
+static const struct retro_core_option_definition stub_options[] = {
+	{ "mupen64plus-EnableNativeResFactor", "Native Resolution Factor", NULL,
+	  { { "0", NULL }, { "1", NULL }, { "2", NULL }, { "3", NULL }, { "4", NULL }, { NULL, NULL } },
+	  "1" },
+	{ NULL, NULL, NULL, { { NULL, NULL } }, NULL },
+};
+
 void retro_init(void) {
 	if (!frame_buf) {
 		frame_buf = (uint16_t *)calloc(STUB_W * STUB_H, sizeof(uint16_t));
 	}
 	frame_counter = 0;
 	last_buttons = 0;
+	if (env_cb) env_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS, (void *)stub_options);
 }
 
 void retro_deinit(void) {

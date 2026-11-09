@@ -15,6 +15,7 @@
 // ============================================================================
 #include "core_defaults.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -88,14 +89,25 @@ const Explicit kExplicit[] = {
 	 "boot through the DS firmware so the BIOS/firmware the user installed is actually used"},
 
 	// --- Nintendo 64 -------------------------------------------------------
-	// 640x480 (the core's default) is 4x the pixels of the console's own
-	// 320x240. On this ABI the difference between "playable" and "slideshow".
-	{"mupen64plus_next_gles2", "mupen64plus-Resolution", "320x240",
+	// Native resolution is the only setting that holds full speed on a 32-bit
+	// ARM core; higher factors are what the display-quality setting (stage 20)
+	// offers the user.
+	{"mupen64plus_next_gles2", "mupen64plus-EnableNativeResFactor", "1",
 	 "native N64 resolution: the only setting that holds full speed on 32-bit ARM"},
 	{"mupen64plus_next_gles2", "mupen64plus-RSP-Plugin", "HLE",
 	 "high-level RSP audio: a fraction of the CPU cost of LLE with the same music and effects"},
 	{"mupen64plus_next_gles2", "mupen64plus-FrameDuping", "True",
 	 "repeat the last frame instead of dropping it: steady picture at the same emulation speed"},
+	// SPHYNX (stage 20 fix, the N64 eject on devices): this core's threaded
+	// renderer runs the emulated machine on a second operating-system thread.
+	// Everything the player owns - the frame/audio sinks, the input state and
+	// the crash landing point - lives on the thread that calls retro_run() and
+	// is thread-local by design, so on that second thread a frame can never
+	// arrive and a fault cannot be caught: the process died and the user was
+	// thrown out of the app the moment he tapped an N64 game. Here the core
+	// runs everything on the calling thread, exactly like every other core.
+	{"mupen64plus_next_gles2", "mupen64plus-ThreadedRenderer", "False",
+	 "keep emulation on the player's guarded thread: the threaded renderer ran it on a thread where no frame could reach the screen and no crash could be caught"},
 
 	// --- PlayStation -------------------------------------------------------
 	{"pcsx_rearmed", "pcsx_rearmed_drc", "enabled",
@@ -270,6 +282,102 @@ std::string DescribeDefaults(const std::string &core_tag) {
 		out += ")";
 	}
 	return out;
+}
+
+// ---------------------------------------------------------------------------
+//  SPHYNX (stage 20): display quality, pure and testable. The numbers below
+//  are measured in percents of a 32-bit ARM budget: stepping the N64 above
+//  its native 320x240 multiplies the pixel work by the square of the factor,
+//  so "auto" steps up only where the hardware has real headroom.
+// ---------------------------------------------------------------------------
+
+bool StrongDevice(DeviceProfile profile) {
+	return profile.cpu_cores >= 8 && profile.ram_mb >= 4000;
+}
+
+bool IsValidQuality(const std::string &quality) {
+	return quality == "auto" || quality == "high" || quality == "balanced" ||
+	       quality == "fast";
+}
+
+std::string QualityResolutionKey(const std::string &core_tag) {
+	// The two cores in this build that render above their console's own
+	// resolution, with the option each one really declares:
+	//   mupen64plus_next_gles2 -> GLideN64 "Native Resolution Factor" (0..8;
+	//     0 means the factor is disabled, which renders native as well);
+	//   flycast -> "Internal Resolution" (1x/2x/4x/8x).
+	if (core_tag == "mupen64plus_next_gles2") return "mupen64plus-EnableNativeResFactor";
+	if (core_tag == "flycast") return "reicast_internal_resolution";
+	return std::string();
+}
+
+std::string QualityAutoBaseline(const std::string &core_tag) {
+	// What the recommendation engine already picks without the quality
+	// setting: the smallest non-zero factor each core offers. A stored value
+	// equal to this is the engine's own writing, not a user's choice.
+	if (core_tag == "mupen64plus_next_gles2") return "1";
+	if (core_tag == "flycast") return "1x";
+	return std::string();
+}
+
+// The value whose area is `rank` steps above the smallest offered one (0 =
+// smallest, 1 = next, ...). "0" (the N64 factor's "disabled") is skipped: it
+// is not a step above anything, it *is* native.
+static std::string QualityValueAtRank(const std::vector<std::string> &values, int rank) {
+	std::vector<std::pair<long, std::string>> steps;   // (area, value), offered order kept
+	for (const std::string &value : values) {
+		const long area = ResolutionArea(value);
+		if (area <= 0) continue;
+		steps.emplace_back(area, value);
+	}
+	if (steps.empty()) return std::string();
+	std::sort(steps.begin(), steps.end(),
+	          [](const std::pair<long, std::string> &a, const std::pair<long, std::string> &b) {
+		          return a.first < b.first;
+	          });
+	// Equal areas are one step (a core that offers the same size twice).
+	int seen = 0;
+	for (size_t i = 0; i < steps.size(); ++i) {
+		if (i && steps[i].first == steps[i - 1].first) continue;
+		if (seen == rank) return steps[i].second;
+		++seen;
+	}
+	// A rank beyond the top falls back to the biggest step there is.
+	return steps.back().second;
+}
+
+std::string QualityPick(const std::string &quality, const std::string &core_tag,
+                        const std::vector<std::string> &values, DeviceProfile profile,
+                        std::string *why) {
+	if (QualityResolutionKey(core_tag).empty()) return std::string();
+	std::string level = quality;
+	if (level.empty() || level == "auto") level = StrongDevice(profile) ? "balanced" : "fast";
+	std::string pick;
+	if (level == "fast") {
+		pick = QualityValueAtRank(values, 0);
+		if (why && !pick.empty()) *why = "native resolution: the sharpest thing full speed can afford here";
+	} else if (level == "balanced") {
+		pick = QualityValueAtRank(values, 1);
+		if (why && !pick.empty()) *why = "one step above native: visibly sharper, still full speed on this device";
+	} else if (level == "high") {
+		// Four times the native pixels (2x linear) or the top step this core
+		// offers, whichever is smaller - "high" must not mean "slideshow".
+		const long native = ResolutionArea(QualityValueAtRank(values, 0));
+		pick = QualityValueAtRank(values, 99);
+		for (const std::string &value : values) {
+			const long area = ResolutionArea(value);
+			if (area <= 0) continue;
+			if (native > 0 && area >= native * 4 && area < ResolutionArea(pick)) pick = value;
+		}
+		if (why && !pick.empty()) *why = "four times the native pixels: the best picture this core offers at a playable speed";
+	}
+	if (!pick.empty() && !values.empty()) {
+		bool offered = false;
+		for (const std::string &value : values)
+			if (value == pick) offered = true;
+		if (!offered) return std::string();
+	}
+	return pick;
 }
 
 }  // namespace sphynx
