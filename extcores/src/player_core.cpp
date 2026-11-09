@@ -830,6 +830,41 @@ std::string QualityFromStored(const std::vector<std::pair<std::string, std::stri
 	return "auto";
 }
 
+// SPHYNX (stage 20): the systems whose core has a real resolution knob also
+// get the display-quality setting, shown as the first entry in Core Settings.
+bool HasQualitySetting(const SphynxPlayerHandle *p) {
+	return !sphynx::QualityResolutionKey(p->core_tag).empty();
+}
+
+sphynx::CoreOption QualityOption(const SphynxPlayerHandle *p) {
+	sphynx::CoreOption option;
+	option.key = "sphynx-quality";
+	option.label = "Display quality (auto = best for this device)";
+	option.current = p->quality;
+	option.values = {"auto", "high", "balanced", "fast"};
+	return option;
+}
+
+// Applies the setting to the running core right away, through the resolution
+// option the core itself declared. Values are checked against that option's
+// own list, so a core that offers nothing matching is simply left alone.
+void LiveApplyQuality(SphynxPlayerHandle *p) {
+	const std::string key = sphynx::QualityResolutionKey(p->core_tag);
+	if (key.empty()) return;
+	for (const sphynx::CoreOption &option : p->session.Env().Options()) {
+		if (option.key != key) continue;
+		std::string why;
+		const std::string resolved = sphynx::QualityPick(p->quality, p->core_tag, option.values,
+		                                                 ThisDeviceProfile(), &why);
+		if (!resolved.empty()) {
+			p->session.EnvMutable().SetOption(key, resolved);
+			sphynx::LogLine("player: display quality " + p->quality + " -> " + key + "=" +
+			                resolved + (why.empty() ? "" : " (" + why + ")"));
+		}
+		return;
+	}
+}
+
 // The concrete resolution value a level means at start time, before the core
 // has declared its value list. These are exactly the values the shipped cores
 // declare (GLideN64's "0".."8", flycast's "1x".."8x"); the live path validates
@@ -1244,6 +1279,14 @@ void *PlayerWorkerEntry(void *raw) {
 	PlayerWorker(args->handle, args->core_path, args->content, args->system_dir);
 	return nullptr;
 }
+
+// SPHYNX (stage 20): the systems whose core has a real resolution knob also
+// get the display-quality setting, shown as the first entry in Core Settings.
+// These three stay outside extern "C": QualityOption returns a C++ type, and
+// a C-linkage function may not (the Android toolchain makes that an error).
+bool HasQualitySetting(const SphynxPlayerHandle *p);
+sphynx::CoreOption QualityOption(const SphynxPlayerHandle *p);
+void LiveApplyQuality(SphynxPlayerHandle *p);
 
 }  // namespace
 
@@ -1715,41 +1758,6 @@ const char *sphynx_player_bios_report(SphynxPlayerHandle *p) {
 
 const char *sphynx_player_bios_status(SphynxPlayerHandle *p) {
 	return p ? p->bios_status.c_str() : "";
-}
-
-// SPHYNX (stage 20): the systems whose core has a real resolution knob also
-// get the display-quality setting, shown as the first entry in Core Settings.
-bool HasQualitySetting(const SphynxPlayerHandle *p) {
-	return !sphynx::QualityResolutionKey(p->core_tag).empty();
-}
-
-sphynx::CoreOption QualityOption(const SphynxPlayerHandle *p) {
-	sphynx::CoreOption option;
-	option.key = "sphynx-quality";
-	option.label = "Display quality (auto = best for this device)";
-	option.current = p->quality;
-	option.values = {"auto", "high", "balanced", "fast"};
-	return option;
-}
-
-// Applies the setting to the running core right away, through the resolution
-// option the core itself declared. Values are checked against that option's
-// own list, so a core that offers nothing matching is simply left alone.
-void LiveApplyQuality(SphynxPlayerHandle *p) {
-	const std::string key = sphynx::QualityResolutionKey(p->core_tag);
-	if (key.empty()) return;
-	for (const sphynx::CoreOption &option : p->session.Env().Options()) {
-		if (option.key != key) continue;
-		std::string why;
-		const std::string resolved = sphynx::QualityPick(p->quality, p->core_tag, option.values,
-		                                                 ThisDeviceProfile(), &why);
-		if (!resolved.empty()) {
-			p->session.EnvMutable().SetOption(key, resolved);
-			sphynx::LogLine("player: display quality " + p->quality + " -> " + key + "=" +
-			                resolved + (why.empty() ? "" : " (" + why + ")"));
-		}
-		return;
-	}
 }
 
 int sphynx_player_option_count(SphynxPlayerHandle *p) {
